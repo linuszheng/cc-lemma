@@ -1779,33 +1779,65 @@ impl<'a> Goal<'a> {
           &self.egraph[class_1_id].data.cvec_data,
           &self.egraph[class_2_id].data.cvec_data,
         ) {
-          let class_1_canonical = &self.egraph[class_1_id].data.canonical_form_data;
-          let class_2_canonical = &self.egraph[class_2_id].data.canonical_form_data;
-          match (class_1_canonical, class_2_canonical) {
-            (CanonicalForm::Const(c1_node), CanonicalForm::Const(c2_node)) => {
-              let num_differing_children: usize = zip(c1_node.children(), c2_node.children())
-                .map(|(child_1, child_2)| if child_1 != child_2 { 0 } else { 1 })
-                .sum();
-              // There is a simpler CC lemma to prove.
-              //
-              // Consider for example the case when the canonical forms are
-              //   c1: (S (plus x x))
-              //   c2: (S (double x))
-              // In this case, the number of differing children is only 1.
-              // The differing children are
-              //   (plus x x) and (double x)
-              // However, we can be sure that if the cvec analysis deemed c1 and
-              // c2 equal, then it will deem these two differing children equal.
-              //
-              // Thus we won't waste our time trying to prove c1 == c2 when
-              // we could instead prove (plus x x) == (double x), which implies
-              // by congruence that c1 == c2.
-              if num_differing_children <= 1 {
-                continue;
+          // RIPPLE-VERIFY {
+          let SEMANTIC_DECOMP_ONLY = true;
+          let attempt_produce_lemma = {
+            if SEMANTIC_DECOMP_ONLY {
+              let fresh_var = format!("fresh_{}_{}", self.name, self.egraph.total_size());
+              let fresh_symb = Symbol::from(&fresh_var);
+              let lhs_expr = self.extract_generalized_expr(class_1_id, fresh_symb, resolved_lhs_id);
+              let lhs_id = self.egraph.add_expr(&lhs_expr);
+              let lhs_expr = self.extract_generalized_expr(class_2_id, fresh_symb, lhs_id);
+              let lhs_id = self.egraph.add_expr(&lhs_expr);
+              let rhs_expr = self.extract_generalized_expr(class_1_id, fresh_symb, resolved_rhs_id);
+              let rhs_id = self.egraph.add_expr(&rhs_expr);
+              let rhs_expr = self.extract_generalized_expr(class_2_id, fresh_symb, rhs_id);
+              let rhs_id = self.egraph.add_expr(&rhs_expr);
+              if let Some(true) = cvecs_equal(
+                &self.egraph.analysis.cvec_analysis,
+                &self.egraph[lhs_id].data.cvec_data,
+                &self.egraph[rhs_id].data.cvec_data,
+              ) {
+                true
+              } else {
+                false
               }
+            } else {
+              true
             }
-            _ => {}
+          };
+          if attempt_produce_lemma {
+            // } RIPPLE-VERIFY
+            let class_1_canonical = &self.egraph[class_1_id].data.canonical_form_data;
+            let class_2_canonical = &self.egraph[class_2_id].data.canonical_form_data;
+            match (class_1_canonical, class_2_canonical) {
+              (CanonicalForm::Const(c1_node), CanonicalForm::Const(c2_node)) => {
+                let num_differing_children: usize = zip(c1_node.children(), c2_node.children())
+                  .map(|(child_1, child_2)| if child_1 != child_2 { 0 } else { 1 })
+                  .sum();
+                // There is a simpler CC lemma to prove.
+                //
+                // Consider for example the case when the canonical forms are
+                //   c1: (S (plus x x))
+                //   c2: (S (double x))
+                // In this case, the number of differing children is only 1.
+                // The differing children are
+                //   (plus x x) and (double x)
+                // However, we can be sure that if the cvec analysis deemed c1 and
+                // c2 equal, then it will deem these two differing children equal.
+                //
+                // Thus we won't waste our time trying to prove c1 == c2 when
+                // we could instead prove (plus x x) == (double x), which implies
+                // by congruence that c1 == c2.
+                if num_differing_children <= 1 {
+                  continue;
+                }
+              }
+              _ => {}
+            }
+            // RIPPLE-VERIFY {
           }
+          // } RIPPLE-VERIFY
           // println!("equal_pair {} {}", class_1_id, class_2_id);
           // println!("found candidate cc lemma: making rewrites");
           let (_rewrites, rewrite_infos) = self.make_lemma_rewrites_from_all_exprs(
