@@ -1212,9 +1212,14 @@ impl<'a> Goal<'a> {
         );
         panic!()
       }
+      // RIPPLE-VERIFY-TODO: check if this is a good use of their method, and get rid of above code
+      // BEFORE
       let lemma_rw = lemma_rw.unwrap();
       lemma_rw.add_to_rewrites(&mut rewrites);
       return rewrites;
+      // AFTER
+      // return self.make_cyclic_lemma_rewrites(timer, lemmas_state, true).0;
+      // END
     }
     // Otherwise, we only create lemmas when we are operating in the cyclic mode
     if CONFIG.is_cyclic() {
@@ -1298,7 +1303,9 @@ impl<'a> Goal<'a> {
     // it's a map because the same guard can match more than once, but we only want to add a new scrutinee once
     let mut stuck_guards = BTreeMap::new();
     // RIPPLE-VERIFY-TODO: generalize this to any i that is in the benchmark
-    for i in vec![2, 3, 4] {
+    // RIPPLE-VERIFY-CONFIG
+    for i in vec![0] {
+      // for i in vec![2, 3, 4] {
       let searcher: Pattern<SymbolLang> =
         format!("({} {} ?x ?y)", format!("{}{}", *ITE, i), guard_var)
           .parse()
@@ -1748,7 +1755,7 @@ impl<'a> Goal<'a> {
     class_2_id: Id,
     resolved_lhs_id: Id,
     resolved_rhs_id: Id,
-  ) {
+  ) -> bool {
     let class_1_canonical = &self.egraph[class_1_id].data.canonical_form_data;
     let class_2_canonical = &self.egraph[class_2_id].data.canonical_form_data;
     match (class_1_canonical, class_2_canonical) {
@@ -1771,7 +1778,7 @@ impl<'a> Goal<'a> {
         // we could instead prove (plus x x) == (double x), which implies
         // by congruence that c1 == c2.
         if num_differing_children <= 1 {
-          return;
+          return false;
         }
       }
       _ => {}
@@ -1795,13 +1802,13 @@ impl<'a> Goal<'a> {
     // We used to check the egraph to see if the lemma helped us, but now
     // we just throw it into our list. We do that check in try_prove_lemmas.
     if new_rewrite_eqs.is_empty() {
-      return;
+      return false;
     }
     if CONFIG.cc_lemmas_generalization {
       let fresh_name = format!("fresh_{}_{}", self.name, self.egraph.total_size());
       for new_rewrite_eq in new_rewrite_eqs.iter() {
         if timer.timeout() {
-          return;
+          return true;
         }
         lemmas.extend(find_generalizations_prop(
           new_rewrite_eq,
@@ -1821,6 +1828,7 @@ impl<'a> Goal<'a> {
     {
       lemmas.extend(new_rewrite_eqs);
     }
+    return false;
   }
 
   /// Search for cc (concrete correspondence) lemmas.
@@ -1830,7 +1838,7 @@ impl<'a> Goal<'a> {
   fn search_for_cc_lemmas(&mut self, timer: &Timer, lemmas_state: &mut LemmasState) -> Vec<Prop> {
     // RIPPLE-VERIFY-CONFIG {
     let FILTER_BY_SEMANTIC_DECOMP = false;
-    let ADD_OUTER_BY_SEMANTIC_DECOMP = true;
+    let ADD_OUTER_BY_SEMANTIC_DECOMP = false;
     // } RIPPLE-VERIFY-CONFIG
     let mut lemmas = vec![];
     self.egraph.analysis.cvec_analysis.saturate();
@@ -1905,7 +1913,7 @@ impl<'a> Goal<'a> {
               ) == Some(true)
             };
             if ADD_OUTER_BY_SEMANTIC_DECOMP && should_add_outer {
-              self.add_lemma(
+              if self.add_lemma(
                 timer,
                 lemmas_state,
                 &mut lemmas,
@@ -1913,14 +1921,16 @@ impl<'a> Goal<'a> {
                 rhs_id_outer,
                 resolved_lhs_id,
                 resolved_rhs_id,
-              );
+              ) {
+                return lemmas;
+              }
             }
             if FILTER_BY_SEMANTIC_DECOMP {
               should_add_inner = should_add_outer;
             }
           }
           if should_add_inner {
-            self.add_lemma(
+            if self.add_lemma(
               timer,
               lemmas_state,
               &mut lemmas,
@@ -1928,7 +1938,9 @@ impl<'a> Goal<'a> {
               class_2_id,
               resolved_lhs_id,
               resolved_rhs_id,
-            );
+            ) {
+              return lemmas;
+            }
           }
         }
       }
@@ -3290,18 +3302,30 @@ impl BreadthFirstScheduler for RandomizedGoalLevelPriorityQueue {
     {
       frontier.retain(|info| self.progress_set.contains(&info.lemma_id));
     }
-    // RIPPLE-VERIFY-TODO: remove min_by_key
+    // RIPPLE-VERIFY:
+    // preserve ordering because it is priority-ordered
+    // min_by_key is stable so it not only gets the smallest element but also preserves the ordering
+    // we have to do the same thing but introduce randomness
+    // todo use proper distributions
+    // RIPPLE-VERIFY-CONFIG {
+    let TEMPERATURE_1 = 0.2;
+    let TEMPERATURE_2 = 0.2;
+    // } RIPPLE-VERIFY-CONFIG
+    let mut rng = rand::thread_rng();
+    let frontier_size = frontier.len();
     if let Some(mut optimal) = frontier.iter().min_by_key(|info| info.size) {
-      // RIPPLE-VERIFY-CONFIG {
-      let TEMPERATURE = 0.9;
-      // } RIPPLE-VERIFY-CONFIG
-      let mut rng = rand::thread_rng();
-      let rand_n: f64 = rng.gen();
-      optimal = frontier
-        .iter()
-        .as_slice()
-        .choose_weighted(&mut rng, |info| f64::powf(TEMPERATURE, info.size as f64))
-        .unwrap();
+      let min_size_mod = optimal.size
+        + (0..10)
+          .collect::<Vec<usize>>()
+          .choose_weighted(&mut rng, |x| f64::powf(TEMPERATURE_1, *x as f64))
+          .unwrap();
+      let lemmas_with_min_size = frontier.iter().filter(|x| x.size <= min_size_mod);
+      optimal = lemmas_with_min_size
+        .enumerate()
+        .collect::<Vec<(usize, &GoalInfo)>>()
+        .choose_weighted(&mut rng, |x| f64::powf(TEMPERATURE_2, x.0 as f64))
+        .unwrap()
+        .1;
       self.next_goal = Some(optimal.clone());
       if self.progress_set.contains(&optimal.lemma_id) {
         self.progress_set.remove(&optimal.lemma_id);
@@ -3644,6 +3668,8 @@ pub fn prove_top(
   );
 
   let start_info = GoalInfo::new(&top_goal_lemma_proof.goals[0], top_goal_lemma_number);
+  // RIPPLE-VERIFY-CONFIG
+  // let mut scheduler = GoalLevelPriorityQueue::default();
   let mut scheduler = RandomizedGoalLevelPriorityQueue::default();
   scheduler.goal_graph.new_lemma(&start_info, None);
   scheduler
