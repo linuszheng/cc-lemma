@@ -1731,11 +1731,99 @@ impl<'a> Goal<'a> {
     self.grounding_instantiations.extend(new_instantiations);
   }
 
+  fn add_lemma(
+    &mut self,
+    timer: &Timer,
+    lemmas_state: &mut LemmasState,
+    lemmas: &mut Vec<Prop>,
+    class_1_id: Id,
+    class_2_id: Id,
+    resolved_lhs_id: Id,
+    resolved_rhs_id: Id,
+  ) {
+    let class_1_canonical = &self.egraph[class_1_id].data.canonical_form_data;
+    let class_2_canonical = &self.egraph[class_2_id].data.canonical_form_data;
+    match (class_1_canonical, class_2_canonical) {
+      (CanonicalForm::Const(c1_node), CanonicalForm::Const(c2_node)) => {
+        let num_differing_children: usize = zip(c1_node.children(), c2_node.children())
+          .map(|(child_1, child_2)| if child_1 != child_2 { 0 } else { 1 })
+          .sum();
+        // There is a simpler CC lemma to prove.
+        //
+        // Consider for example the case when the canonical forms are
+        //   c1: (S (plus x x))
+        //   c2: (S (double x))
+        // In this case, the number of differing children is only 1.
+        // The differing children are
+        //   (plus x x) and (double x)
+        // However, we can be sure that if the cvec analysis deemed c1 and
+        // c2 equal, then it will deem these two differing children equal.
+        //
+        // Thus we won't waste our time trying to prove c1 == c2 when
+        // we could instead prove (plus x x) == (double x), which implies
+        // by congruence that c1 == c2.
+        if num_differing_children <= 1 {
+          return;
+        }
+      }
+      _ => {}
+    }
+    // println!("equal_pair {} {}", class_1_id, class_2_id);
+    // println!("found candidate cc lemma: making rewrites");
+    let (_rewrites, rewrite_infos) = self.make_lemma_rewrites_from_all_exprs(
+      class_1_id,
+      class_2_id,
+      vec![],
+      timer,
+      lemmas_state,
+      false,
+      false,
+    );
+    // println!("made rewrites");
+    let new_rewrite_eqs: Vec<Prop> = rewrite_infos
+      .into_iter()
+      .map(|rw_info| rw_info.lemma_prop)
+      .collect();
+    // We used to check the egraph to see if the lemma helped us, but now
+    // we just throw it into our list. We do that check in try_prove_lemmas.
+    if new_rewrite_eqs.is_empty() {
+      return;
+    }
+    if CONFIG.cc_lemmas_generalization {
+      let fresh_name = format!("fresh_{}_{}", self.name, self.egraph.total_size());
+      for new_rewrite_eq in new_rewrite_eqs.iter() {
+        if timer.timeout() {
+          return;
+        }
+        lemmas.extend(find_generalizations_prop(
+          new_rewrite_eq,
+          self.global_search_state.context,
+          fresh_name.clone(),
+        ));
+      }
+    }
+
+    // Optimization: skip adding any lemmas that would be subsumed by a cyclic lemma
+    //for lemma in new_rewrite_eqs.iter() {
+    //  println!("raw lemmas {}", lemma)
+    //}
+    if !CONFIG.only_generalize
+      && !(class_1_id == resolved_lhs_id && class_2_id == resolved_rhs_id
+        || class_1_id == resolved_rhs_id && class_2_id == resolved_lhs_id)
+    {
+      lemmas.extend(new_rewrite_eqs);
+    }
+  }
+
   /// Search for cc (concrete correspondence) lemmas.
   ///
   /// These are lemmas we propose from subterms in the e-graph that our concrete
   /// analysis deems equal on some set of random terms.
   fn search_for_cc_lemmas(&mut self, timer: &Timer, lemmas_state: &mut LemmasState) -> Vec<Prop> {
+    // RIPPLE-VERIFY-CONFIG {
+    let FILTER_BY_SEMANTIC_DECOMP = false;
+    let ADD_OUTER_BY_SEMANTIC_DECOMP = true;
+    // } RIPPLE-VERIFY-CONFIG
     let mut lemmas = vec![];
     self.egraph.analysis.cvec_analysis.saturate();
     let resolved_lhs_id = self.egraph.find(self.eq.lhs.id);
@@ -1773,116 +1861,66 @@ impl<'a> Goal<'a> {
         //   || class_1_id == resolved_rhs_id && class_2_id == resolved_lhs_id {
         //     continue
         // }
-
-        if let Some(true) = cvecs_equal(
-          &self.egraph.analysis.cvec_analysis,
-          &self.egraph[class_1_id].data.cvec_data,
-          &self.egraph[class_2_id].data.cvec_data,
-        ) {
-          // RIPPLE-VERIFY {
-          let SEMANTIC_DECOMP_ONLY = false;
-          let attempt_produce_lemma = {
-            if SEMANTIC_DECOMP_ONLY {
-              let fresh_var = format!("fresh_{}_{}", self.name, self.egraph.total_size());
-              let fresh_symb = Symbol::from(&fresh_var);
-              let lhs_expr = self.extract_generalized_expr(class_1_id, fresh_symb, resolved_lhs_id);
-              let lhs_id = self.egraph.add_expr(&lhs_expr);
-              let lhs_expr = self.extract_generalized_expr(class_2_id, fresh_symb, lhs_id);
-              let lhs_id = self.egraph.add_expr(&lhs_expr);
-              let rhs_expr = self.extract_generalized_expr(class_1_id, fresh_symb, resolved_rhs_id);
-              let rhs_id = self.egraph.add_expr(&rhs_expr);
-              let rhs_expr = self.extract_generalized_expr(class_2_id, fresh_symb, rhs_id);
-              let rhs_id = self.egraph.add_expr(&rhs_expr);
-              self.egraph.analysis.cvec_analysis.saturate();
-              if let Some(true) = cvecs_equal(
+        let can_add_inner = {
+          Some(true)
+            == cvecs_equal(
+              &self.egraph.analysis.cvec_analysis,
+              &self.egraph[class_1_id].data.cvec_data,
+              &self.egraph[class_2_id].data.cvec_data,
+            )
+        };
+        if can_add_inner {
+          let need_to_create_outer_exprs =
+            FILTER_BY_SEMANTIC_DECOMP || ADD_OUTER_BY_SEMANTIC_DECOMP;
+          let mut should_add_inner = true;
+          if need_to_create_outer_exprs {
+            let fresh_var = format!("fresh_{}_{}", self.name, self.egraph.total_size());
+            let fresh_symb = Symbol::from(&fresh_var);
+            let lhs_expr_outer =
+              self.extract_generalized_expr(class_1_id, fresh_symb, resolved_lhs_id);
+            let lhs_id_outer = self.egraph.add_expr(&lhs_expr_outer);
+            let lhs_expr_outer =
+              self.extract_generalized_expr(class_2_id, fresh_symb, lhs_id_outer);
+            let lhs_id_outer = self.egraph.add_expr(&lhs_expr_outer); // RIPPLE-VERIFY-TODO: do other order
+            let rhs_expr_outer =
+              self.extract_generalized_expr(class_1_id, fresh_symb, resolved_rhs_id);
+            let rhs_id_outer = self.egraph.add_expr(&rhs_expr_outer);
+            let rhs_expr_outer =
+              self.extract_generalized_expr(class_2_id, fresh_symb, rhs_id_outer);
+            let rhs_id_outer = self.egraph.add_expr(&rhs_expr_outer); // RIPPLE-VERFIY-TODO: do other order
+            self.egraph.analysis.cvec_analysis.saturate();
+            let should_add_outer = {
+              cvecs_equal(
                 &self.egraph.analysis.cvec_analysis,
-                &self.egraph[lhs_id].data.cvec_data,
-                &self.egraph[rhs_id].data.cvec_data,
-              ) {
-                true
-              } else {
-                false
-              }
-            } else {
-              true
+                &self.egraph[lhs_id_outer].data.cvec_data,
+                &self.egraph[rhs_id_outer].data.cvec_data,
+              ) == Some(true)
+            };
+            if ADD_OUTER_BY_SEMANTIC_DECOMP && should_add_outer {
+              self.add_lemma(
+                timer,
+                lemmas_state,
+                &mut lemmas,
+                lhs_id_outer,
+                rhs_id_outer,
+                resolved_lhs_id,
+                resolved_rhs_id,
+              );
             }
-          };
-          if !attempt_produce_lemma {
-            continue;
-          }
-          // } RIPPLE-VERIFY
-          let class_1_canonical = &self.egraph[class_1_id].data.canonical_form_data;
-          let class_2_canonical = &self.egraph[class_2_id].data.canonical_form_data;
-          match (class_1_canonical, class_2_canonical) {
-            (CanonicalForm::Const(c1_node), CanonicalForm::Const(c2_node)) => {
-              let num_differing_children: usize = zip(c1_node.children(), c2_node.children())
-                .map(|(child_1, child_2)| if child_1 != child_2 { 0 } else { 1 })
-                .sum();
-              // There is a simpler CC lemma to prove.
-              //
-              // Consider for example the case when the canonical forms are
-              //   c1: (S (plus x x))
-              //   c2: (S (double x))
-              // In this case, the number of differing children is only 1.
-              // The differing children are
-              //   (plus x x) and (double x)
-              // However, we can be sure that if the cvec analysis deemed c1 and
-              // c2 equal, then it will deem these two differing children equal.
-              //
-              // Thus we won't waste our time trying to prove c1 == c2 when
-              // we could instead prove (plus x x) == (double x), which implies
-              // by congruence that c1 == c2.
-              if num_differing_children <= 1 {
-                continue;
-              }
-            }
-            _ => {}
-          }
-          // println!("equal_pair {} {}", class_1_id, class_2_id);
-          // println!("found candidate cc lemma: making rewrites");
-          let (_rewrites, rewrite_infos) = self.make_lemma_rewrites_from_all_exprs(
-            class_1_id,
-            class_2_id,
-            vec![],
-            timer,
-            lemmas_state,
-            false,
-            false,
-          );
-          // println!("made rewrites");
-          let new_rewrite_eqs: Vec<Prop> = rewrite_infos
-            .into_iter()
-            .map(|rw_info| rw_info.lemma_prop)
-            .collect();
-          // We used to check the egraph to see if the lemma helped us, but now
-          // we just throw it into our list. We do that check in try_prove_lemmas.
-          if new_rewrite_eqs.is_empty() {
-            continue;
-          }
-
-          if CONFIG.cc_lemmas_generalization {
-            let fresh_name = format!("fresh_{}_{}", self.name, self.egraph.total_size());
-            for new_rewrite_eq in new_rewrite_eqs.iter() {
-              if timer.timeout() {
-                return lemmas;
-              }
-              lemmas.extend(find_generalizations_prop(
-                new_rewrite_eq,
-                self.global_search_state.context,
-                fresh_name.clone(),
-              ));
+            if FILTER_BY_SEMANTIC_DECOMP {
+              should_add_inner = should_add_outer;
             }
           }
-
-          // Optimization: skip adding any lemmas that would be subsumed by a cyclic lemma
-          //for lemma in new_rewrite_eqs.iter() {
-          //  println!("raw lemmas {}", lemma)
-          //}
-          if !CONFIG.only_generalize
-            && !(class_1_id == resolved_lhs_id && class_2_id == resolved_rhs_id
-              || class_1_id == resolved_rhs_id && class_2_id == resolved_lhs_id)
-          {
-            lemmas.extend(new_rewrite_eqs);
+          if should_add_inner {
+            self.add_lemma(
+              timer,
+              lemmas_state,
+              &mut lemmas,
+              class_1_id,
+              class_2_id,
+              resolved_lhs_id,
+              resolved_rhs_id,
+            );
           }
         }
       }
@@ -2973,6 +3011,16 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     let lemma_proof_state = proof_state.lemma_proofs.get_mut(&lemma_index).unwrap();
     // println!("\ntry goal {} from {} {}", info.full_exp, self.prop_map[&info.lemma_id], lemma_proof_state.case_split_depth);
 
+    // RIPPLE-VERIFY-CONFIG {
+    let PRINT_LEMMA_ATTEMPTS = true;
+    // } RIPPLE-VERIFY-CONFIG
+    if PRINT_LEMMA_ATTEMPTS {
+      println!(
+        "? attempting lemma {} {}",
+        lemma_proof_state.prop, info.full_exp
+      );
+    }
+
     let step_res =
       lemma_proof_state.try_goal(&info, &proof_state.timer, &mut proof_state.lemmas_state);
 
@@ -3021,7 +3069,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
       {
         let state = proof_state.lemma_proofs.get_mut(&info.lemma_id).unwrap();
         state.outcome = Some(Outcome::Valid);
-        println!("proved lemma {} {}", state.prop, info.full_exp);
+        println!("+ proved lemma {} {}", state.prop, info.full_exp);
 
         if CONFIG.exclude_bid_reachable {
           state.rw_no_analysis.clone().map(|rw| {
@@ -3103,7 +3151,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
             .goal_graph
             .set_lemma_res(goal.lemma_id, GraphProveStatus::Valid);
 
-          println!("proved lemma {}", lemma_state.prop);
+          println!("+ proved lemma {}", lemma_state.prop);
           new_lemma.insert(goal.lemma_id);
 
           if CONFIG.exclude_bid_reachable {
