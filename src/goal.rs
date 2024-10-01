@@ -1304,8 +1304,8 @@ impl<'a> Goal<'a> {
     let mut stuck_guards = BTreeMap::new();
     // RIPPLE-VERIFY-TODO: generalize this to any i that is in the benchmark
     // RIPPLE-VERIFY-CONFIG
-    for i in vec![0] {
-      // for i in vec![2, 3, 4] {
+    // for i in vec![0] {
+    for i in vec![2, 3, 4] {
       let searcher: Pattern<SymbolLang> =
         format!("({} {} ?x ?y)", format!("{}{}", *ITE, i), guard_var)
           .parse()
@@ -1838,7 +1838,7 @@ impl<'a> Goal<'a> {
   fn search_for_cc_lemmas(&mut self, timer: &Timer, lemmas_state: &mut LemmasState) -> Vec<Prop> {
     // RIPPLE-VERIFY-CONFIG {
     let FILTER_BY_SEMANTIC_DECOMP = false;
-    let ADD_OUTER_BY_SEMANTIC_DECOMP = false;
+    let ADD_OUTER_BY_SEMANTIC_DECOMP = true;
     // } RIPPLE-VERIFY-CONFIG
     let mut lemmas = vec![];
     self.egraph.analysis.cvec_analysis.saturate();
@@ -3308,7 +3308,7 @@ impl BreadthFirstScheduler for RandomizedGoalLevelPriorityQueue {
     // we have to do the same thing but introduce randomness
     // todo use proper distributions
     // RIPPLE-VERIFY-CONFIG {
-    let TEMPERATURE_1 = 0.2;
+    let TEMPERATURE_1 = 0.7;
     let TEMPERATURE_2 = 0.2;
     // } RIPPLE-VERIFY-CONFIG
     let mut rng = rand::thread_rng();
