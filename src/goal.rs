@@ -368,7 +368,8 @@ fn find_generalizations_prop(
         lhs_vars.contains(&var.to_string()) || rhs_vars.contains(&var.to_string())
       });
       new_params.push((var_symb, ty));
-      // println!("Generalization candidate: {} = {}", new_lhs, new_rhs);
+      // println!("Generalization candidate LHS: {}", new_lhs);
+      // println!("Generalization candidate RHS: {}", new_rhs);
       output.push(Prop::new(Equation::new(new_lhs, new_rhs), new_params));
     }
   }
@@ -1819,6 +1820,8 @@ impl<'a> Goal<'a> {
         if timer.timeout() {
           return true;
         }
+        // println!("LHS {}", new_rewrite_eq.eq.lhs);
+        // println!("RHS {}", new_rewrite_eq.eq.rhs);
         lemmas.extend(find_generalizations_prop(
           new_rewrite_eq,
           self.global_search_state.context,
@@ -1847,8 +1850,8 @@ impl<'a> Goal<'a> {
   fn search_for_cc_lemmas(&mut self, timer: &Timer, lemmas_state: &mut LemmasState) -> Vec<Prop> {
     // RIPPLE-VERIFY-CONFIG {
     let FILTER_BY_SEMANTIC_DECOMP = true;
-    let ADD_OUTER_BY_SEMANTIC_DECOMP = false;
-    let RELAX_FILTER_FOR_WAVE_RULES = true;
+    let ADD_OUTER_BY_SEMANTIC_DECOMP = true;
+    let RELAX_FILTER_FOR_WAVE_RULES = false;
     let RELAX_FILTER_FOR_FERT = true;
     // } RIPPLE-VERIFY-CONFIG
     let mut lemmas = vec![];
@@ -3108,7 +3111,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     // println!("\ntry goal {} from {} {}", info.full_exp, self.prop_map[&info.lemma_id], lemma_proof_state.case_split_depth);
 
     // RIPPLE-VERIFY-CONFIG {
-    let PRINT_LEMMA_ATTEMPTS = false;
+    let PRINT_LEMMA_ATTEMPTS = true;
     // } RIPPLE-VERIFY-CONFIG
     if PRINT_LEMMA_ATTEMPTS {
       println!(
