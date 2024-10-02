@@ -1304,8 +1304,8 @@ impl<'a> Goal<'a> {
     let mut stuck_guards = BTreeMap::new();
     // RIPPLE-VERIFY-TODO: generalize this to any i that is in the benchmark
     // RIPPLE-VERIFY-CONFIG
-    // for i in vec![0] {
-    for i in vec![2, 3, 4] {
+    for i in vec![0] {
+      // for i in vec![2, 3, 4] {
       let searcher: Pattern<SymbolLang> =
         format!("({} {} ?x ?y)", format!("{}{}", *ITE, i), guard_var)
           .parse()
@@ -1710,6 +1710,15 @@ impl<'a> Goal<'a> {
         .map(|x| {
           // Which class was this param instantiated to?
           let id = inst.get(x).unwrap();
+
+          let extractor = Extractor::new(&self.egraph, AstSize);
+          let expr = extractor.find_best(*id).1;
+          // println!(
+          //   "canonical form data: {:?}",
+          //   self.egraph[*id].data.canonical_form_data
+          // );
+          // println!("expr to ground: {}", expr);
+
           // Parameters must be canonical (at least in a clean state)
           let canonical = CanonicalFormAnalysis::extract_canonical(&self.egraph, *id).unwrap();
           // Try replacing the case-split variable with its child
@@ -1837,8 +1846,10 @@ impl<'a> Goal<'a> {
   /// analysis deems equal on some set of random terms.
   fn search_for_cc_lemmas(&mut self, timer: &Timer, lemmas_state: &mut LemmasState) -> Vec<Prop> {
     // RIPPLE-VERIFY-CONFIG {
-    let FILTER_BY_SEMANTIC_DECOMP = false;
-    let ADD_OUTER_BY_SEMANTIC_DECOMP = true;
+    let FILTER_BY_SEMANTIC_DECOMP = true;
+    let ADD_OUTER_BY_SEMANTIC_DECOMP = false;
+    let RELAX_FILTER_FOR_WAVE_RULES = true;
+    let RELAX_FILTER_FOR_FERT = true;
     // } RIPPLE-VERIFY-CONFIG
     let mut lemmas = vec![];
     self.egraph.analysis.cvec_analysis.saturate();
@@ -1888,22 +1899,24 @@ impl<'a> Goal<'a> {
         if can_add_inner {
           let need_to_create_outer_exprs =
             FILTER_BY_SEMANTIC_DECOMP || ADD_OUTER_BY_SEMANTIC_DECOMP;
-          let mut should_add_inner = true;
+          let mut should_add_inner = false;
           if need_to_create_outer_exprs {
             let fresh_var = format!("fresh_{}_{}", self.name, self.egraph.total_size());
             let fresh_symb = Symbol::from(&fresh_var);
-            let lhs_expr_outer =
-              self.extract_generalized_expr(class_1_id, fresh_symb, resolved_lhs_id);
+            let lhs_expr_outer = self.extract_generalized_expr_two(
+              class_1_id,
+              class_2_id,
+              fresh_symb,
+              resolved_lhs_id,
+            );
             let lhs_id_outer = self.egraph.add_expr(&lhs_expr_outer);
-            let lhs_expr_outer =
-              self.extract_generalized_expr(class_2_id, fresh_symb, lhs_id_outer);
-            let lhs_id_outer = self.egraph.add_expr(&lhs_expr_outer); // RIPPLE-VERIFY-TODO: do other order
-            let rhs_expr_outer =
-              self.extract_generalized_expr(class_1_id, fresh_symb, resolved_rhs_id);
+            let rhs_expr_outer = self.extract_generalized_expr_two(
+              class_1_id,
+              class_2_id,
+              fresh_symb,
+              resolved_rhs_id,
+            );
             let rhs_id_outer = self.egraph.add_expr(&rhs_expr_outer);
-            let rhs_expr_outer =
-              self.extract_generalized_expr(class_2_id, fresh_symb, rhs_id_outer);
-            let rhs_id_outer = self.egraph.add_expr(&rhs_expr_outer); // RIPPLE-VERIFY-TODO: do other order
             self.egraph.analysis.cvec_analysis.saturate();
             let should_add_outer = {
               cvecs_equal(
@@ -1912,22 +1925,36 @@ impl<'a> Goal<'a> {
                 &self.egraph[rhs_id_outer].data.cvec_data,
               ) == Some(true)
             };
-            if ADD_OUTER_BY_SEMANTIC_DECOMP && should_add_outer {
-              if self.add_lemma(
-                timer,
-                lemmas_state,
-                &mut lemmas,
-                lhs_id_outer,
-                rhs_id_outer,
-                resolved_lhs_id,
-                resolved_rhs_id,
-              ) {
+            if ADD_OUTER_BY_SEMANTIC_DECOMP {
+              if should_add_outer
+                && self.add_lemma(
+                  timer,
+                  lemmas_state,
+                  &mut lemmas,
+                  lhs_id_outer,
+                  rhs_id_outer,
+                  resolved_lhs_id,
+                  resolved_rhs_id,
+                )
+              {
                 return lemmas;
               }
             }
             if FILTER_BY_SEMANTIC_DECOMP {
-              should_add_inner = should_add_outer;
+              should_add_inner |= should_add_outer;
             }
+          }
+          if !FILTER_BY_SEMANTIC_DECOMP {
+            should_add_inner |= true;
+          }
+          if RELAX_FILTER_FOR_WAVE_RULES {
+            let is_ripple_rule = false; // RIPPLE-VERIFY-TODO
+            should_add_inner |= is_ripple_rule;
+          }
+          if RELAX_FILTER_FOR_FERT {
+            let is_lhs_rhs = (class_1_id == resolved_lhs_id && class_2_id == resolved_rhs_id)
+              || (class_1_id == resolved_rhs_id && class_2_id == resolved_lhs_id);
+            should_add_inner |= is_lhs_rhs;
           }
           if should_add_inner {
             if self.add_lemma(
@@ -2023,7 +2050,6 @@ impl<'a> Goal<'a> {
 
   fn extract_generalized_expr_helper(
     &self,
-    gen_class: Id,
     gen_fresh_sym: Symbol,
     extract_class: Id,
     parent_to_child_index: &BTreeMap<Id, usize>,
@@ -2061,7 +2087,6 @@ impl<'a> Goal<'a> {
         // Extract an expression for it.
         let expr = node.join_recexprs(|child_class| {
           self.extract_generalized_expr_helper(
-            gen_class,
             gen_fresh_sym,
             child_class,
             parent_to_child_index,
@@ -2123,7 +2148,58 @@ impl<'a> Goal<'a> {
     // lemma will just be the LHS = RHS and it will probably be rejected by our
     // lemma set since we seed it with LHS = RHS.
     self.extract_generalized_expr_helper(
-      gen_class,
+      gen_fresh_sym,
+      extract_class,
+      &parent_to_child_index,
+      &mut cache,
+    )
+  }
+  fn extract_generalized_expr_two(
+    &self,
+    gen_class1: Id,
+    gen_class2: Id,
+    gen_fresh_sym: Symbol,
+    extract_class: Id,
+  ) -> Expr {
+    // println!("extracting generalized expr ({}) for {}", gen_class, extract_class);
+    let mut parent_map = BTreeMap::default();
+    let mut parents = BTreeSet::default();
+    // Compute a map from each eclass to its parent enodes in the egraph rooted
+    // at extract_class.
+    self.compute_parents(extract_class, &mut parent_map, &mut parents);
+    // println!("parent map: {:?}", parent_map);
+    let mut parent_to_child_index = BTreeMap::default();
+
+    // Computes a map from parent eclass to the index of the enode that will
+    // lead the parent to gen_class. If there are multiple indices, one (I
+    // believe the largest) is chosen arbitrarily.
+    self.all_parents(
+      gen_class1,
+      &parent_map,
+      &mut parent_to_child_index,
+      &mut BTreeSet::default(),
+    );
+    self.all_parents(
+      gen_class2,
+      &parent_map,
+      &mut parent_to_child_index,
+      &mut BTreeSet::default(),
+    );
+    // println!("parent to child index: {:?}", parent_to_child_index);
+    let mut cache = BTreeMap::default();
+    cache.insert(
+      gen_class1,
+      Some(vec![SymbolLang::leaf(gen_fresh_sym)].into()),
+    );
+    cache.insert(
+      gen_class2,
+      Some(vec![SymbolLang::leaf(gen_fresh_sym)].into()),
+    );
+    // FIXME: skip extraction if gen_class isn't contained in either the LHS and
+    // RHS. I think it's fine to keep it as is for now because the generalized
+    // lemma will just be the LHS = RHS and it will probably be rejected by our
+    // lemma set since we seed it with LHS = RHS.
+    self.extract_generalized_expr_helper(
       gen_fresh_sym,
       extract_class,
       &parent_to_child_index,
@@ -3032,7 +3108,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     // println!("\ntry goal {} from {} {}", info.full_exp, self.prop_map[&info.lemma_id], lemma_proof_state.case_split_depth);
 
     // RIPPLE-VERIFY-CONFIG {
-    let PRINT_LEMMA_ATTEMPTS = true;
+    let PRINT_LEMMA_ATTEMPTS = false;
     // } RIPPLE-VERIFY-CONFIG
     if PRINT_LEMMA_ATTEMPTS {
       println!(
@@ -3308,9 +3384,9 @@ impl BreadthFirstScheduler for RandomizedGoalLevelPriorityQueue {
     // we have to do the same thing but introduce randomness
     // todo use proper distributions
     // RIPPLE-VERIFY-CONFIG {
-    let TEMPERATURE_1 = 0.7;
-    let TEMPERATURE_2 = 0.2;
-    // } RIPPLE-VERIFY-CONFIG
+    let TEMPERATURE_1 = 0.2; // randomize the size of lemma chosen
+    let TEMPERATURE_2 = 0.1; // randomize the position in dfs of lemma chosen
+                             // } RIPPLE-VERIFY-CONFIG
     let mut rng = rand::thread_rng();
     let frontier_size = frontier.len();
     if let Some(mut optimal) = frontier.iter().min_by_key(|info| info.size) {
@@ -3429,6 +3505,8 @@ impl BreadthFirstScheduler for RandomizedGoalLevelPriorityQueue {
         self
           .goal_graph
           .record_node_status(&info, GraphProveStatus::Invalid);
+        let state = proof_state.lemma_proofs.get_mut(&info.lemma_id).unwrap();
+        println!("- proved invalidity {} {}", state.prop, info.full_exp);
       }
       if self.goal_graph.is_lemma_proved(info.lemma_id)
         && (!CONFIG.reduce_proven_lemma || !self.goal_graph.is_root(&info) || info.lemma_id == 0)
@@ -3669,8 +3747,8 @@ pub fn prove_top(
 
   let start_info = GoalInfo::new(&top_goal_lemma_proof.goals[0], top_goal_lemma_number);
   // RIPPLE-VERIFY-CONFIG
-  // let mut scheduler = GoalLevelPriorityQueue::default();
-  let mut scheduler = RandomizedGoalLevelPriorityQueue::default();
+  let mut scheduler = GoalLevelPriorityQueue::default();
+  // let mut scheduler = RandomizedGoalLevelPriorityQueue::default();
   scheduler.goal_graph.new_lemma(&start_info, None);
   scheduler
     .prop_map

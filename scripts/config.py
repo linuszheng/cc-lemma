@@ -1,12 +1,12 @@
-timeout = 2
+timeout = 120
 memory_limit = 16
 
-dataset_root = "/home/artifact/cc-lemma/benchmarks"
-cclemma_path = "/home/artifact/cc-lemma"
+dataset_root = "benchmarks"
+cclemma_path = "."
 hipspec_path = "/home/artifact/hipspec"
 thesy_path = "/home/artifact/TheSy"
 cvc4_bin_name = "cvc4-vmcai2015"
-output_path = "/home/artifact/cc-lemma/results"
+output_path = "results"
 
 hipspec_expensive_props = {
     "clam": [81],

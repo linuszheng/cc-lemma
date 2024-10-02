@@ -84,5 +84,4 @@
   (let deepestNew (?tv25) (tf6 ?tv25))
   (:: mainNew (-> (Tree) List))
   (let mainNew (?tv31) (fst4 (deepestNew ?tv31)))
-  (=== optimize (inp0) (Tree) (main inp0) (mainNew inp0))
 )

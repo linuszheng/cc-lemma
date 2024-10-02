@@ -398,7 +398,7 @@ pub fn parse_file(filename: &str) -> Result<ParserState, SexpError> {
             match rule_sexp.list()?[0].string()?.as_str() {
               "=>" => {
                 let rw = Rewrite::new(
-                  format!("hyp-lemma-{}", lhs),
+                  format!("hyp-lemma-{}-{}", lhs, rhs),
                   searcher.clone(),
                   applier.clone(),
                 )
@@ -408,14 +408,14 @@ pub fn parse_file(filename: &str) -> Result<ParserState, SexpError> {
               }
               "<=>" => {
                 let rw = Rewrite::new(
-                  format!("hyp-lemma-{}", lhs),
+                  format!("hyp-lemma-{}-{}", lhs, rhs),
                   searcher.clone(),
                   applier.clone(),
                 )
                 .unwrap();
                 local_rules.push(rw);
                 let rw = Rewrite::new(
-                  format!("hyp-lemma-{}", rhs),
+                  format!("hyp-lemma-{}-{}", rhs, lhs),
                   applier.clone(),
                   searcher.clone(),
                 )
