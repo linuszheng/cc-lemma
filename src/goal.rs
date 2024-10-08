@@ -1843,6 +1843,21 @@ impl<'a> Goal<'a> {
     return false;
   }
 
+  fn check_if_ripple_rule(&mut self, lhs_id: Id, rhs_id: Id) -> bool {
+    let is_var = |v: &str| {
+      self
+        .local_context
+        .contains_key(&Symbol::from_str(v).unwrap())
+    };
+    let extractor = egg::Extractor::new(&self.egraph, AstSize);
+    let lhs_expr = extractor.find_best(lhs_id).1;
+    let rhs_expr = extractor.find_best(rhs_id).1;
+    let lhs_vars = get_vars(&lhs_expr, is_var);
+    let rhs_vars = get_vars(&rhs_expr, is_var);
+    for v in lhs_vars.intersection(&rhs_vars) {}
+    false
+  }
+
   /// Search for cc (concrete correspondence) lemmas.
   ///
   /// These are lemmas we propose from subterms in the e-graph that our concrete
@@ -1851,7 +1866,7 @@ impl<'a> Goal<'a> {
     // RIPPLE-VERIFY-CONFIG {
     let FILTER_BY_SEMANTIC_DECOMP = true;
     let ADD_OUTER_BY_SEMANTIC_DECOMP = true;
-    let RELAX_FILTER_FOR_WAVE_RULES = false;
+    let RELAX_FILTER_FOR_WAVE_RULES = true;
     let RELAX_FILTER_FOR_FERT = true;
     // } RIPPLE-VERIFY-CONFIG
     let mut lemmas = vec![];
@@ -1866,6 +1881,9 @@ impl<'a> Goal<'a> {
       // print_all_expressions_in_egraph(&self.egraph, 7);
     }
     let class_ids: Vec<Id> = self.egraph.classes().map(|c| c.id).collect();
+
+    // RIPPLE-VERIFY-TODO: reuse from try_goal if we want to use it here
+    // let (blocking_vars, blocking_exprs) = self.find_blocking(timer);
 
     for class_1_id in &class_ids {
       for class_2_id in &class_ids {
@@ -1951,7 +1969,7 @@ impl<'a> Goal<'a> {
             should_add_inner |= true;
           }
           if RELAX_FILTER_FOR_WAVE_RULES {
-            let is_ripple_rule = false; // RIPPLE-VERIFY-TODO
+            let is_ripple_rule = self.check_if_ripple_rule(class_1_id, class_2_id); // RIPPLE-VERIFY-TODO
             should_add_inner |= is_ripple_rule;
           }
           if RELAX_FILTER_FOR_FERT {

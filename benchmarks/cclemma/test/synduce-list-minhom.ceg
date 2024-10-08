@@ -57,5 +57,6 @@
   (=== optimize1 (a b c) (Nat Nat Nat) (min (min a b) c) (min a (min b c))
   )
   (=== optimize (inp0) (CList) (main inp0) (mainNew inp0)
+  ((<=> (min (min ?a ?b) ?c) (min ?a (min ?b ?c))))
   )
 )
