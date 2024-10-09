@@ -243,9 +243,22 @@ fn validate_variable(variable: &str) {
 /// but most of the work is done ahead of time.
 pub fn parse_file(filename: &str) -> Result<ParserState, SexpError> {
   let mut state = ParserState::default();
-  let sexpr = parser::parse_file(filename).unwrap();
+  let mut sexpr = parser::parse_file(filename).unwrap();
 
-  for decl in sexpr.list()? {
+  let mut sexpr_list = sexpr.take_list().unwrap();
+  // RIPPLE-VERIFY-TODO: add these definitions
+  // sexpr_list.extend(parser::parse_str(
+  //   "  (:: ite0 (-> (Bool Bool Bool) Bool))
+  // (let ite0 (True ?x ?y) ?x)
+  // (let ite0 (False ?x ?y) ?y)",
+  // ));
+  // sexpr_list.extend(parser::parse_str(
+  //   "  (:: not (-> (Bool) Bool))
+  // (let not (True) False)
+  // (let not (False) True)",
+  // ));
+
+  for decl in sexpr_list {
     let decl_kind = decl.list()?[0].string()?.as_str();
     match decl_kind {
       "data" => {
