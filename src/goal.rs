@@ -358,6 +358,7 @@ fn find_generalizations_prop(
     let new_rhs = substitute_sexp(&prop.eq.rhs, subexpr, &generalized_var);
     let mut new_lhs_maybe = None;
     // if lhs is a constant then we only need to generalize one side
+    // watch out - generalizing 1
     if sexp_is_constructor(&prop.eq.lhs) {
       new_lhs_maybe = Some(prop.eq.lhs.clone());
     }
@@ -576,6 +577,34 @@ fn rewrite_expr(expr: &Equation, name: &String, term: &Sexp) -> Equation {
     rhs: replace(&expr.rhs, name, term),
   }
 }
+
+// fn get_atoms(
+//   id_to_exprs_map: &Denotation<SymbolLang>,
+//   memo: &mut BTreeSet<Id>,
+//   id: Id,
+// ) -> Vec<Expr> {
+//   if memo.contains(&id) {
+//     return vec![];
+//   }
+//   memo.insert(id);
+//   let mut res = vec![];
+//   if let Some(exprs) = id_to_exprs_map.get(&id) {
+//     for expr in exprs {
+//       let last_expr: SymbolLang = expr.as_ref().last().unwrap().clone();
+//       let op = last_expr.op;
+//       let mut func_is_all_bool = false; // TODO
+//       if op == Symbol::from(AND.clone()) {
+//         println!("and");
+//         res.extend(get_atoms(id_to_exprs_map, memo, last_expr.children()[0]));
+//         res.extend(get_atoms(id_to_exprs_map, memo, last_expr.children()[1]));
+//       } else if !func_is_all_bool {
+//         println!("expr: {}", expr.clone());
+//         res.push(expr.clone());
+//       }
+//     }
+//   }
+//   res
+// }
 
 fn get_top_symbol(expr: &Expr) -> Symbol {
   expr.as_ref().last().unwrap().op
@@ -1895,7 +1924,7 @@ impl<'a> Goal<'a> {
     let ADD_OUTER_BY_SEMANTIC_DECOMP = false;
     let RELAX_FILTER_FOR_WAVE_RULES = false;
     let RELAX_FILTER_FOR_FERT = true;
-    let ADD_PREMISE_IMPLICATIONS = false;
+    let ADD_PREMISE_IMPLICATIONS = true;
     let TURN_CC_LEMMAS_OFF = true;
     // } RIPPLE-VERIFY-CONFIG
     let mut lemmas = vec![];
@@ -1919,102 +1948,94 @@ impl<'a> Goal<'a> {
     if ADD_PREMISE_IMPLICATIONS {
       let true_id = self.egraph.add(SymbolLang::leaf(TRUE.clone()));
       let false_id = self.egraph.add(SymbolLang::leaf(FALSE.clone()));
-      if !(resolved_lhs_id == true_id
-        || resolved_lhs_id == false_id
-        || resolved_rhs_id == true_id
-        || resolved_rhs_id == false_id)
-      {
-        let bool_premises = self.premises.iter().filter(|p| {
-          self.egraph.find(p.lhs.id) == true_id || self.egraph.find(p.lhs.id) == false_id
-        });
-        let bool_expr_ids = class_ids
-          .iter()
-          .filter(|id| {
-            let class_op = self.egraph[**id].data.canonical_form_data.get_enode().op;
-            if class_op == "$".into() {
-              false
-            } else if class_op.to_string().starts_with("g_") {
-              true
+      // if !(resolved_lhs_id == true_id
+      //   || resolved_lhs_id == false_id
+      //   || resolved_rhs_id == true_id
+      //   || resolved_rhs_id == false_id)
+      // {
+      let bool_premises = self.premises.iter().filter(|p| {
+        self.egraph.find(p.lhs.id) == true_id || self.egraph.find(p.lhs.id) == false_id
+      });
+      let bool_expr_ids = class_ids
+        .iter()
+        .filter(|id| {
+          let class_op = self.egraph[**id].data.canonical_form_data.get_enode().op;
+          if class_op == "$".into() {
+            false
+          } else if class_op.to_string().starts_with("g_") {
+            false
+          } else {
+            // RIPPLE-VERIFY-TODO: debug when this fails
+            let res = self
+              .global_search_state
+              .context
+              .get(&class_op)
+              .or_else(|| self.local_context.get(&class_op));
+            if let Some(r) = res {
+              let (_, class_ty) = r.args_ret();
+              class_ty.to_string() == *BOOL_TYPE
             } else {
-              // RIPPLE-VERIFY-TODO: debug when this fails
-              let res = self
-                .global_search_state
-                .context
-                .get(&class_op)
-                .or_else(|| self.local_context.get(&class_op));
-              if let Some(r) = res {
-                let (_, class_ty) = r.args_ret();
-                class_ty.to_string() == *BOOL_TYPE
-              } else {
-                false
-              }
+              false
             }
-          })
-          .map(|id| self.egraph.find(*id));
-        for bool_expr_id in bool_expr_ids {
-          for premise in bool_premises.clone() {
-            let premise_id = self.egraph.find(premise.lhs.id);
-            if bool_expr_id != premise_id && bool_expr_id != true_id && bool_expr_id != false_id {
-              let exprs =
-                get_all_expressions_with_loop(&self.egraph, vec![bool_expr_id, premise_id]);
-              for bool_expr in exprs.get(&bool_expr_id).unwrap() {
-                for premise_expr in exprs.get(&premise_id).unwrap() {
-                  // println!("testing: {}=?={}", bool_expr, premise_expr);
-                  // println!("cvec1");
-                  // print_cvec(
-                  //   &self.egraph.analysis.cvec_analysis,
-                  //   &self.egraph[*bool_expr_id].data.cvec_data,
-                  // );
-                  // println!("cvec2");
-                  // print_cvec(
-                  //   &self.egraph.analysis.cvec_analysis,
-                  //   &self.egraph[premise.lhs.id].data.cvec_data,
-                  // );
-
-                  if var_set(&to_pattern(bool_expr, |x| true))
-                    .intersection(&var_set(&to_pattern(premise_expr, |x| true)))
-                    .collect::<Vec<&Var>>()
-                    .len()
-                    > 0
-                    && !self.is_reducible(bool_expr)
-                    && !self.is_reducible(premise_expr)
-                  {
-                    let not_op = SymbolLang::new(format!("{}", *NOT), vec![Id::from(0)]);
-                    let bool_expr_not = not_op.join_recexprs(|id| bool_expr);
-                    let ite_str = format!("{}{}", *ITE, 0);
-                    let true_expr = RecExpr::from_str(&TRUE).unwrap();
-                    let implies_op =
-                      SymbolLang::new(ite_str, vec![Id::from(0), Id::from(1), Id::from(2)]);
-                    for res_expr in vec![bool_expr, &bool_expr_not] {
-                      let implies_expr = implies_op.join_recexprs(|id| {
-                        if id == Id::from(0) {
-                          premise_expr
-                        } else if id == Id::from(1) {
-                          res_expr
-                        } else {
-                          &true_expr
-                        }
-                      });
-
-                      let lemma_number = lemmas_state.fresh_lemma();
-                      let lemma_rw_opt = self.make_lemma_rewrite_type_only(
-                        &implies_expr,
-                        &true_expr,
-                        lemma_number,
-                        true,
-                      );
-                      if let Some(lemma_rw) = lemma_rw_opt {
-                        println!("adding lemma: {}", lemma_rw.lemma_prop);
-                        lemmas.push(lemma_rw.lemma_prop);
+          }
+        })
+        .map(|id| self.egraph.find(*id));
+      for bool_expr_id in bool_expr_ids {
+        for premise in bool_premises.clone() {
+          let premise_id = self.egraph.find(premise.lhs.id);
+          if bool_expr_id != premise_id && bool_expr_id != true_id && bool_expr_id != false_id {
+            let exprs = get_all_expressions_with_loop(&self.egraph, vec![bool_expr_id, premise_id]);
+            for bool_expr in exprs.get(&bool_expr_id).unwrap() {
+              let mut memo = BTreeSet::<Id>::default();
+              for atom_expr in get_atoms(&exprs, &mut memo, premise_id) {
+                println!("maybe: {}=?=>{}", atom_expr, bool_expr);
+                // println!("maybe: {}=?=>{}", atom_expr, bool_expr_not);
+                if var_set(&to_pattern(bool_expr, |x| true))
+                  .intersection(&var_set(&to_pattern(&atom_expr, |x| true)))
+                  .collect::<Vec<&Var>>()
+                  .len()
+                  > 0
+                  && !self.is_reducible(bool_expr)
+                  && !self.is_reducible(&atom_expr)
+                  && *bool_expr != atom_expr
+                {
+                  let not_op = SymbolLang::new(format!("{}", *NOT), vec![Id::from(0)]);
+                  let bool_expr_not = not_op.join_recexprs(|id| bool_expr);
+                  let ite_str = format!("{}{}", *ITE, 0);
+                  let true_expr = RecExpr::from_str(&TRUE).unwrap();
+                  let implies_op =
+                    SymbolLang::new(ite_str, vec![Id::from(0), Id::from(1), Id::from(2)]);
+                  for res_expr in vec![bool_expr, &bool_expr_not] {
+                    let implies_expr = implies_op.join_recexprs(|id| {
+                      if id == Id::from(0) {
+                        &atom_expr
+                      } else if id == Id::from(1) {
+                        res_expr
+                      } else {
+                        &true_expr
                       }
+                    });
+
+                    let lemma_number = lemmas_state.fresh_lemma();
+                    let lemma_rw_opt = self.make_lemma_rewrite_type_only(
+                      &implies_expr,
+                      &true_expr,
+                      lemma_number,
+                      true,
+                    );
+                    if let Some(lemma_rw) = lemma_rw_opt {
+                      println!("adding lemma: {}", lemma_rw.lemma_prop);
+                      lemmas.push(lemma_rw.lemma_prop);
                     }
                   }
                 }
               }
+              // }
             }
           }
         }
       }
+      // }
     }
 
     for class_1_id in &class_ids {
@@ -2863,9 +2884,11 @@ impl<'a> LemmaProofState<'a> {
     let pos = self.get_info_index(info);
     let goal = self.goals.get_mut(pos).unwrap();
 
-    println!("premises:");
-    for p in &goal.premises {
-      println!("{}", p);
+    if goal.premises.len() > 0 {
+      print!("premises: ");
+      for p in &goal.premises {
+        println!("{}", p);
+      }
     }
     println!("case split vars: {:?}", goal.case_split_vars);
 
@@ -3221,7 +3244,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     }
     self.is_found_new_lemma = true;
     let mut frontier = self.goal_graph.get_frontier_goals();
-    // RIPPLE-VERIFY: print queue
+    // RIPPLE-VERIFY-PRINT queue
 
     if CONFIG.verbose {
       let _goals = self.goal_graph.get_lemma(0).goals.clone();

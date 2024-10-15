@@ -129,6 +129,7 @@ lazy_static! {
   pub static ref TRUE: String = mangle_name("True");
   pub static ref FALSE: String = mangle_name("False");
   pub static ref NOT: String = mangle_name("not");
+  pub static ref AND: String = mangle_name("and");
 }
 pub const ARROW: &str = "->";
 pub const APPLY: &str = "$";

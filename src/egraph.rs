@@ -9,7 +9,7 @@ use std::{
 
 /// Denotation of an egraph (or its subgraph)
 /// is a map from eclass ids to sets of expressions
-type Denotation<L> = BTreeMap<Id, Vec<RecExpr<L>>>;
+pub type Denotation<L> = BTreeMap<Id, Vec<RecExpr<L>>>;
 
 /// Compute the denotation of all roots in egraph, ignoring cycles
 pub fn get_all_expressions<L: Language, A: Analysis<L>>(
