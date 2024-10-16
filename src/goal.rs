@@ -824,13 +824,14 @@ impl<'a> Goal<'a> {
     let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
     let impl_lem = Rewrite::new(
       format!("special1"),
-      ConditionalSearcher {
-        searcher: imply_rhs,
-        condition: StrEquality::new(TRUE.clone()),
+      imply_rhs,
+      ConditionalApplier {
+        applier: pattern_true.clone(),
+        condition: ConditionEqual::new(imply_lhs, pattern_true),
       },
-      pattern_true,
     )
     .unwrap();
+
     temp_lemmas.push(&impl_lem);
     let rewrites: Vec<_> = self
       .global_search_state
