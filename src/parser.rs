@@ -5,7 +5,7 @@ use symbolic_expressions::*;
 
 use crate::ast::*;
 use crate::config::CONFIG;
-use crate::egraph::{ConditionalSearcher, DestructiveApplier};
+use crate::egraph::{ConditionalSearcher, DestructiveApplier, StrEquality};
 use crate::goal::*;
 
 fn make_rewrite_for_defn<A>(

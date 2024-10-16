@@ -64,13 +64,13 @@
   (let ite0 (False ?x ?y) ?y)  
 
   
-    (=== test (v0 v1 a b) (Tree Tree Nat Nat)
+    (=== test (c d a b) (Tree Tree Nat Nat)
   (True)
   (ite0 
-    (and (and (nateq a b) (tf3 v0)) (tf3 v1)) 
+    (and (and (nateq a b) (tf3 c)) (tf3 d)) 
     (not (lq a b)) 
     True)
-  )
+    )
 
 
 )

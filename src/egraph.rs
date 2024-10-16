@@ -366,6 +366,43 @@ where
   }
 }
 
+pub struct IdEquality {
+  id: Id,
+}
+impl IdEquality {
+  pub fn new(id: Id) -> Self {
+    Self { id }
+  }
+}
+impl<L, N> SearchCondition<L, N> for IdEquality
+where
+  L: Language,
+  N: Analysis<L>,
+{
+  fn check(&self, egraph: &EGraph<L, N>, eclass: Id, subst: &Subst) -> bool {
+    egraph.find(eclass) == egraph.find(self.id)
+  }
+}
+
+pub struct StrEquality {
+  str: String,
+}
+impl StrEquality {
+  pub fn new(str: String) -> Self {
+    Self { str }
+  }
+}
+impl<L, N> SearchCondition<L, N> for StrEquality
+where
+  L: Language + egg::FromOp,
+  N: Analysis<L>,
+{
+  fn check(&self, egraph: &EGraph<L, N>, eclass: Id, subst: &Subst) -> bool {
+    let id = egraph.lookup_expr(&self.str.parse().unwrap()).unwrap();
+    egraph.find(eclass) == egraph.find(id)
+  }
+}
+
 pub struct DestructiveApplier {
   searcher: Pattern<SymbolLang>,
   applier: Pattern<SymbolLang>,
