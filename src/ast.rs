@@ -537,27 +537,22 @@ impl Display for Equation {
   }
 }
 
+// ------ RIPPLE-VERIFY-TODO: make sure equality is right
+
 // Can the vars of this expression be instantiated to the other expression?
-fn cmp_sexp_by_instantiation<F>(
-  sexp1: &Sexp,
-  sexp2: &Sexp,
-  is_var: F,
-) -> Option<(std::cmp::Ordering, SSubst)>
+fn cmp_sexp_by_instantiation<F>(sexp1: &Sexp, sexp2: &Sexp, is_var: F) -> Option<std::cmp::Ordering>
 where
   F: FnOnce(&str) -> bool + Copy,
 {
-  let substs_1_into_2 = find_instantiations(sexp1, sexp2, is_var);
-  let sexp1_leq_sexp2 = substs_1_into_2.is_some();
-  let substs_2_into_1 = find_instantiations(sexp2, sexp1, is_var);
-  let sexp2_leq_sexp1 = substs_2_into_1.is_some();
+  let sexp1_leq_sexp2 = find_instantiations(sexp1, sexp2, is_var).is_some();
+  let sexp2_leq_sexp1 = find_instantiations(sexp2, sexp1, is_var).is_some();
   match (sexp1_leq_sexp2, sexp2_leq_sexp1) {
-    (true, true) => Some((std::cmp::Ordering::Equal, substs_1_into_2.unwrap())),
-    (true, false) => Some((std::cmp::Ordering::Less, substs_1_into_2.unwrap())),
-    (false, true) => Some((std::cmp::Ordering::Greater, substs_2_into_1.unwrap())),
+    (true, true) => Some(std::cmp::Ordering::Equal),
+    (true, false) => Some(std::cmp::Ordering::Less),
+    (false, true) => Some(std::cmp::Ordering::Greater),
     (false, false) => None,
   }
 }
-
 // TODO: add a precondition
 #[derive(Debug, Clone)]
 pub struct Prop {
@@ -729,18 +724,11 @@ impl PartialOrd for Prop {
         .chain(other.params.iter())
         .any(|(var, _)| s == &var.to_string())
     };
-    let lhs_res = cmp_sexp_by_instantiation(&self.eq.lhs, &other.eq.lhs, is_var);
-    let rhs_res = cmp_sexp_by_instantiation(&self.eq.rhs, &other.eq.rhs, is_var);
+    let lhs_cmp = cmp_sexp_by_instantiation(&self.eq.lhs, &other.eq.lhs, is_var);
+    let rhs_cmp = cmp_sexp_by_instantiation(&self.eq.rhs, &other.eq.rhs, is_var);
     // They should be the same result, otherwise, they aren't equal
-    if lhs_res == rhs_res {
-      if let Some((lhs_cmp, lhs_substs)) = lhs_res {
-        if let Some((rhs_cmp, rhs_substs)) = rhs_res {
-          if lhs_cmp == rhs_cmp && lhs_substs == rhs_substs {
-            return Some(lhs_cmp);
-          }
-        }
-      }
-      None
+    if lhs_cmp == rhs_cmp {
+      lhs_cmp
     } else {
       None
     }

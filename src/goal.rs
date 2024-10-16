@@ -335,6 +335,7 @@ fn find_generalizations_prop(
   global_context: &Context,
   fresh_name: String,
 ) -> Vec<Prop> {
+  println!("find generalizations prop");
   let lhs_nontrivial_subexprs = nontrivial_sexp_subexpressions_containing_vars(&prop.eq.lhs);
   let rhs_nontrivial_subexprs = nontrivial_sexp_subexpressions_containing_vars(&prop.eq.rhs);
   let mut output = vec![];
@@ -380,9 +381,34 @@ fn find_generalizations_prop(
       // println!("Generalization candidate LHS: {}", new_lhs);
       // println!("Generalization candidate RHS: {}", new_rhs);
       output.push(Prop::new(Equation::new(new_lhs, new_rhs), new_params));
+      // let temp = find_generalizations_prop(
+      //   &Prop::new(Equation::new(new_lhs, new_rhs), new_params),
+      //   global_context,
+      //   fresh_name.clone(),
+      // );
+      // output.extend(temp);
     }
   }
   // RIPPLE-VERIFY-TODO: do the generalization for the other side
+  output
+}
+
+fn find_generalizations_prop_n(
+  prop: &Prop,
+  global_context: &Context,
+  fresh_name: String,
+  n: usize,
+) -> Vec<Prop> {
+  let mut output = vec![prop.clone()];
+  for i in 0..n {
+    for p in output.clone() {
+      output.extend(find_generalizations_prop(
+        &p,
+        global_context,
+        fresh_name.clone(),
+      ));
+    }
+  }
   output
 }
 
@@ -578,35 +604,37 @@ fn rewrite_expr(expr: &Equation, name: &String, term: &Sexp) -> Equation {
   }
 }
 
-// fn get_atoms(
-//   id_to_exprs_map: &Denotation<SymbolLang>,
-//   memo: &mut BTreeSet<Id>,
-//   id: Id,
-// ) -> Vec<Expr> {
-//   if memo.contains(&id) {
-//     return vec![];
-//   }
-//   memo.insert(id);
-//   let mut res = vec![];
-//   if let Some(exprs) = id_to_exprs_map.get(&id) {
-//     for expr in exprs {
-//       let last_expr: SymbolLang = expr.as_ref().last().unwrap().clone();
-//       let op = last_expr.op;
-//       let mut func_is_all_bool = false; // TODO
-//       if op == Symbol::from(AND.clone()) {
-//         println!("and");
-//         res.extend(get_atoms(id_to_exprs_map, memo, last_expr.children()[0]));
-//         res.extend(get_atoms(id_to_exprs_map, memo, last_expr.children()[1]));
-//       } else if !func_is_all_bool {
-//         println!("expr: {}", expr.clone());
-//         res.push(expr.clone());
-//       }
-//     }
-//   }
-//   res
-// }
+fn get_atoms(
+  id_to_exprs_map: &Denotation<SymbolLang>,
+  memo: &mut BTreeSet<Id>,
+  id: Id,
+) -> Vec<Expr> {
+  if memo.contains(&id) {
+    return vec![];
+  }
+  memo.insert(id);
+  let mut res = vec![];
+  if let Some(exprs) = id_to_exprs_map.get(&id) {
+    for expr in exprs {
+      let last_expr: SymbolLang = expr.as_ref().last().unwrap().clone();
+      let op = last_expr.op;
+      let mut func_is_bad = false;
+      func_is_bad |= (op == (TRUE.clone()).into());
+      func_is_bad |= (op == (FALSE.clone()).into());
+      if op == Symbol::from(AND.clone()) {
+        println!("and");
+        res.extend(get_atoms(id_to_exprs_map, memo, last_expr.children()[0]));
+        res.extend(get_atoms(id_to_exprs_map, memo, last_expr.children()[1]));
+      } else if !func_is_bad {
+        println!("hexpr: {}", expr.clone());
+        res.push(expr.clone());
+      }
+    }
+  }
+  res
+}
 
-fn get_atoms(root: Sexp) -> Vec<Sexp> {
+fn get_atoms_sexp(root: Sexp) -> Vec<Sexp> {
   match root.clone() {
     Sexp::List(children) => {
       let mut child_iter = children.iter();
@@ -614,7 +642,7 @@ fn get_atoms(root: Sexp) -> Vec<Sexp> {
       if f == Sexp::String(format!("{}", *AND)) {
         let mut res = vec![];
         child_iter.for_each(|child| {
-          res.extend(get_atoms(child.clone()));
+          res.extend(get_atoms_sexp(child.clone()));
         });
         res
       } else {
@@ -799,15 +827,32 @@ impl<'a> Goal<'a> {
         let f = child_iter.next().unwrap().clone();
         let ite_str = format!("{}{}", *ITE, 0);
         if f == Sexp::String(ite_str) {
-          let cond = child_iter.next().unwrap().clone();
-          let atom_sexps = get_atoms(cond);
-          println!("has an and");
-          atom_sexps.len() > 1
+          let mut cond = child_iter.next().unwrap().clone();
+          let atom_sexps = get_atoms_sexp(cond.clone());
+          println!("has an ite");
+          let is_guard = match cond {
+            Sexp::String(s) => s.starts_with("g_"),
+            _ => false,
+          };
+          atom_sexps.len() > 1 || is_guard
         } else {
           false
         }
       }
-      Sexp::String(s) => false,
+      _ => false,
+    }
+  }
+
+  pub fn is_implication(&mut self) -> bool {
+    let sexp = &self.eq.rhs.sexp;
+    println!("examining expr: {}", sexp);
+    match sexp.clone() {
+      Sexp::List(children) => {
+        let mut child_iter = children.iter();
+        let f = child_iter.next().unwrap().clone();
+        let ite_str = format!("{}{}", *ITE, 0);
+        f == Sexp::String(ite_str)
+      }
       _ => false,
     }
   }
@@ -911,6 +956,10 @@ impl<'a> Goal<'a> {
       for rhs_expr in exprs.get(&rhs_id).unwrap() {
         if timer.timeout() {
           return (rewrites, lemma_rws);
+        }
+        let rhs: Pattern<SymbolLang> = to_pattern(rhs_expr, is_var);
+        if has_guard_wildcards(&rhs) {
+          continue;
         }
         let lemma_number = lemmas_state.fresh_lemma();
 
@@ -2011,7 +2060,7 @@ impl<'a> Goal<'a> {
 
     // do premise implications here, before anything else
     // RIPPLE-VERIFY-TODO
-    if ADD_PREMISE_IMPLICATIONS && self.is_implication_with_and() {
+    if ADD_PREMISE_IMPLICATIONS {
       let true_id = self.egraph.add(SymbolLang::leaf(TRUE.clone()));
       let false_id = self.egraph.add(SymbolLang::leaf(FALSE.clone()));
       // if !(resolved_lhs_id == true_id
@@ -2049,25 +2098,46 @@ impl<'a> Goal<'a> {
         .map(|id| self.egraph.find(*id));
 
       let is_var = |v: &Symbol| self.local_context.contains_key(&v.clone());
+      println!("memo glob: {:?}", self.global_search_state.context);
+      println!("memo loc: {:?}", self.local_context);
       for premise in bool_premises {
-        let atom_sexps = get_atoms(premise.lhs.sexp.clone());
-        if atom_sexps.len() == 1 {
-          continue;
-        }
         for bool_expr_id in bool_expr_ids.clone() {
-          let exprs = get_all_expressions_with_loop(&self.egraph, vec![bool_expr_id]);
+          let exprs =
+            get_all_expressions_with_loop(&self.egraph, vec![bool_expr_id, premise.lhs.id]);
+          let mut memo = BTreeSet::default();
+          let atom_exprs = get_atoms(&exprs, &mut memo, premise.lhs.id);
           for bool_expr in exprs.get(&bool_expr_id).unwrap() {
-            for atom_sexp in atom_sexps.clone() {
-              let atom_expr: Expr = atom_sexp.to_string().parse().unwrap();
+            for atom_expr in atom_exprs.clone() {
+              // println!("atom: {:?}", atom_expr);
+              // println!(
+              //   "stats: {} {}",
+              //   atom_expr.as_ref().len(),
+              //   !self.is_reducible(&atom_expr)
+              // );
+              // println!(
+              //   "bool expr: {:?}   {}",
+              //   bool_expr,
+              //   !self.is_reducible(&bool_expr)
+              // );
+              // println!(
+              //   "var set bool_expr: {:?}",
+              //   var_set(&to_pattern(&bool_expr, is_var))
+              // );
+              // println!(
+              //   "var set atom_expr: {:?}",
+              //   var_set(&to_pattern(&atom_expr, is_var))
+              // );
               if var_set(&to_pattern(&bool_expr, is_var))
                 .intersection(&var_set(&to_pattern(&atom_expr, is_var)))
                 .collect::<Vec<&Var>>()
                 .len()
-                == var_set(&to_pattern(&atom_expr, is_var)).len()   // TODO overly restrictive - replace with > 1
+                >= 1
                 && !self.is_reducible(bool_expr)
                 && !self.is_reducible(&atom_expr)
                 && *bool_expr != atom_expr
+                && atom_expr.as_ref().len() > 1
               {
+                // println!("passed");
                 let not_op = SymbolLang::new(format!("{}", *NOT), vec![Id::from(0)]);
                 let bool_expr_not = not_op.join_recexprs(|id| bool_expr);
                 println!("maybe: {}=?=>{}", atom_expr, bool_expr);
@@ -2087,7 +2157,7 @@ impl<'a> Goal<'a> {
                     }
                   });
 
-                  let lemma_number = lemmas_state.fresh_lemma();
+                  let lemma_number = 0; // this is not used
                   let lemma_rw_opt = self.make_lemma_rewrite_type_only(
                     &implies_expr,
                     &true_expr,
@@ -2096,7 +2166,15 @@ impl<'a> Goal<'a> {
                   );
                   if let Some(lemma_rw) = lemma_rw_opt {
                     println!("adding lemma: {}", lemma_rw.lemma_prop);
-                    lemmas.push(lemma_rw.lemma_prop);
+                    // RIPPLE-VERIFY-CONFIG generalizations
+                    lemmas.extend(find_generalizations_prop_n(
+                      &lemma_rw.lemma_prop,
+                      self.global_search_state.context,
+                      self.name.clone(),
+                      2,
+                    ));
+                    // or not
+                    // lemmas.push(lemma_rw.lemma_prop);
                   }
                 }
               }
@@ -2107,7 +2185,7 @@ impl<'a> Goal<'a> {
       }
       // }
     }
-    if !self.is_implication_with_and() {
+    if !self.is_implication() {
       for class_1_id in &class_ids {
         for class_2_id in &class_ids {
           if timer.timeout() {
@@ -2763,6 +2841,7 @@ impl LemmasState {
   }
 
   pub fn find_or_make_fresh_lemma(&mut self, prop: Prop, proof_depth: usize) -> usize {
+    println!("mprop: {}", prop);
     self
       .all_lemmas
       .entry(prop)
@@ -2771,6 +2850,7 @@ impl LemmasState {
         // the borrow checker.
         let number = self.lemma_number;
         self.lemma_number += 1;
+        println!("must insert - new - {}", number);
         (number, proof_depth)
       })
       .0
@@ -2972,6 +3052,7 @@ impl<'a> LemmaProofState<'a> {
       goal.save_egraph();
     }
     if let Some(proof_leaf) = goal.find_proof() {
+      println!("proof found");
       match proof_leaf {
         ProofLeaf::Todo => {
           if goal.premises.is_empty() {
@@ -3048,11 +3129,18 @@ impl<'a> LemmaProofState<'a> {
       // TODO fix abhorrent heuristic
       let mut should_case_split = false;
       if !goal.is_implication_with_and() {
+        println!("1");
         should_case_split = true;
       };
       if scrutinee.name.to_string().starts_with("g_") {
+        println!("2");
         should_case_split = true;
       }
+      if goal.local_context.get(&scrutinee.name).unwrap().to_string() != BOOL_TYPE.clone() {
+        println!("3");
+        should_case_split = true;
+      }
+      println!("case split: {}", should_case_split);
       if should_case_split {
         println!("CASE SPLIT on {}", scrutinee.name);
         if CONFIG.verbose {
@@ -3078,7 +3166,6 @@ impl<'a> LemmaProofState<'a> {
         return Some((related_lemmas, goal_infos));
       } else {
         println!("manual refuse to case split");
-        self.outcome = None;
         return Some((related_lemmas, vec![]));
       }
     } else {
@@ -3098,6 +3185,10 @@ impl<'a> LemmaProofState<'a> {
     let pos = self.get_info_index(info);
     let goal = self.goals.get_mut(pos).unwrap();
     goal.saturate(&lemmas_state.lemma_rewrites);
+    if CONFIG.save_graphs {
+      goal.save_egraph();
+    }
+    println!("try finish");
     if let Some(leaf) = goal.find_proof() {
       let name = goal.name.clone();
       self.process_goal_explanation(leaf, &name);
@@ -3343,7 +3434,8 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     // if CONFIG.verbose {
     let _goals = self.goal_graph.get_lemma(0).goals.clone();
     println!("\n\n================= current queue ==============");
-    for info in frontier.iter() {
+    // LIMIT TO 5
+    for info in frontier.iter().take(5) {
       println!("[{}] {}", info.size, info.full_exp);
       println!("  ({}) {}", info.lemma_id, self.prop_map[&info.lemma_id]);
     }
@@ -3469,7 +3561,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
       {
         let state = proof_state.lemma_proofs.get_mut(&info.lemma_id).unwrap();
         state.outcome = Some(Outcome::Valid);
-        println!("+ proved lemma {} {}", state.prop, info.full_exp);
+        println!("+ proved lemma (hl) {} {}", state.prop, info.full_exp);
 
         if CONFIG.exclude_bid_reachable {
           state.rw_no_analysis.clone().map(|rw| {
@@ -3507,11 +3599,11 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
   fn on_proven_lemma(&mut self, _lemma: usize, proof_state: &mut ProofState<'_>) {
     let mut new_lemma = HashSet::new();
     new_lemma.insert(_lemma);
+    println!("proven lemma yay");
 
     while !new_lemma.is_empty() {
       // update those subsumed lemmas
       self.update_subsumed_lemmas(proof_state);
-
       let proved_goals: Vec<_> = self
         .goal_graph
         .get_waiting_goals(Some(&new_lemma))
@@ -3551,7 +3643,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
             .goal_graph
             .set_lemma_res(goal.lemma_id, GraphProveStatus::Valid);
 
-          println!("+ proved lemma {}", lemma_state.prop);
+          println!("+ proved lemma (opl) {}", lemma_state.prop);
           new_lemma.insert(goal.lemma_id);
 
           if CONFIG.exclude_bid_reachable {

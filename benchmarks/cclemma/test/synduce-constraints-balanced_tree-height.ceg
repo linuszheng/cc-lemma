@@ -11,9 +11,9 @@
   (:: Nil (-> (Unit) Tree))
   (:: Node (-> (Nat Tree Tree) Tree))
   (:: lq (-> (Nat Nat) Bool))
-  (let lq (Zero (Succ ?x)) True)
-  (let lq (?x Zero) False)
-  (let lq ((Succ ?x) (Succ ?y)) (lq ?x ?y))
+  (axiom lq (Zero (Succ ?x)) True)
+  (axiom lq (?x Zero) False)
+  (axiom lq ((Succ ?x) (Succ ?y)) (lq ?x ?y))
   (:: ite1 (-> (Bool Nat Nat) Nat))
   (let ite1 (True ?x ?y) ?x)
   (let ite1 (False ?x ?y) ?y)
@@ -34,10 +34,10 @@
   (let and (?x False) False)
   (let and (True True) True)
   (:: nateq (-> (Nat Nat) Bool))
-  (let nateq (Zero Zero) True)
-  (let nateq (Zero (Succ ?x)) False)
-  (let nateq ((Succ ?x) Zero) False)
-  (let nateq ((Succ ?x) (Succ ?y)) (nateq ?x ?y))
+  (axiom nateq (Zero Zero) True)
+  (axiom nateq (Zero (Succ ?x)) False)
+  (axiom nateq ((Succ ?x) Zero) False)
+  (axiom nateq ((Succ ?x) (Succ ?y)) (nateq ?x ?y))
   (:: tf3 (-> (Tree) Bool))
   (let tf3 ((Nil ?tv12)) True)
   (let tf3 ((Node ?tv13 ?tv14 ?tv15)) (and (and (nateq (height ?tv14) (height ?tv15)) (tf2 ?tv14)) (tf2 ?tv15)))
@@ -57,8 +57,8 @@
   (:: mainNew (-> (Tree) Nat))
   (let mainNew (?tv31) (ite1 (balanced ?tv31) (targetNew ?tv31) Zero))
   (:: not (-> (Bool) Bool))
-  (let not (True) False)
-  (let not (False) True)
+  (axiom not (True) False)
+  (axiom not (False) True)
   (:: ite0 (-> (Bool Bool Bool) Bool))
   (let ite0 (True ?x ?y) ?x)
   (let ite0 (False ?x ?y) ?y)  
@@ -66,14 +66,7 @@
 
 
 
-    
-    (=== test (c d a b) (Tree Tree Nat Nat)
-  (True)
-  (ite0 
-    (and (and (and True (nateq a b)) (tf3 c)) (tf3 d)) 
-    (not (lq a b)) 
-    True)
-    )
+  (=== optimize (inp0) (Tree) (main inp0) (mainNew inp0) )
 
 
 )

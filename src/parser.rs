@@ -195,7 +195,19 @@ impl ParserState {
       roots.push(premise_lhs);
       roots.push(premise_rhs);
     }
-    let (names, mut rules) = self.used_names_and_definitions(&roots);
+    let (mut names, mut rules) = self.used_names_and_definitions(&roots);
+    // RIPPLE-VERIFY-HARDCODE
+    // need to ensure that bool and imply are in the set of rules and names
+    let ite0 = format!("{}{}", *ITE, 0);
+    names.insert(ite0.clone().into());
+    names.insert(ite0.clone().into());
+    let def_rules = self
+      .definition(&ite0.clone().into())
+      .into_iter()
+      .chain(self.definition(&NOT.clone().into()));
+    for rule in def_rules {
+      rules.push(rule.clone());
+    }
     let filtered_defns = self
       .defns
       .iter()
@@ -338,14 +350,16 @@ pub fn parse_file(filename: &str) -> Result<ParserState, SexpError> {
         // HACK: add the same rules to a list of rewrites for cvecs. This is
         // only done because we don't have a good way of storing rules that can
         // work as both Rw and CvecRw.
-        if decl_kind != "axiom" {
-          state.cvec_rules.push(make_rewrite_for_defn(
-            &mangled_name,
-            &mangled_args,
-            &mangled_value,
-            false,
-          ));
-        }
+        // RIPPLE-VERIFY: what use is an axiom? I am co-opting it to mean
+        // non-destructive rewrite
+        // if decl_kind != "axiom" {
+        state.cvec_rules.push(make_rewrite_for_defn(
+          &mangled_name,
+          &mangled_args,
+          &mangled_value,
+          false,
+        ));
+        // }
 
         // Add to the hashmap
         if let Some(cases) = state.defns.get_mut(&mangled_name) {
