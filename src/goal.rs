@@ -608,12 +608,12 @@ fn get_atoms(
   id_to_exprs_map: &Denotation<SymbolLang>,
   memo: &mut BTreeSet<Id>,
   id: Id,
-) -> Vec<Expr> {
+) -> BTreeSet<Expr> {
   if memo.contains(&id) {
-    return vec![];
+    return BTreeSet::default();
   }
   memo.insert(id);
-  let mut res = vec![];
+  let mut res = BTreeSet::default();
   if let Some(exprs) = id_to_exprs_map.get(&id) {
     for expr in exprs {
       let last_expr: SymbolLang = expr.as_ref().last().unwrap().clone();
@@ -622,12 +622,10 @@ fn get_atoms(
       func_is_bad |= (op == (TRUE.clone()).into());
       func_is_bad |= (op == (FALSE.clone()).into());
       if op == Symbol::from(AND.clone()) {
-        println!("and");
         res.extend(get_atoms(id_to_exprs_map, memo, last_expr.children()[0]));
         res.extend(get_atoms(id_to_exprs_map, memo, last_expr.children()[1]));
       } else if !func_is_bad {
-        println!("hexpr: {}", expr.clone());
-        res.push(expr.clone());
+        res.insert(expr.clone());
       }
     }
   }
@@ -674,6 +672,33 @@ fn get_output_type_name(expr: &Type) -> Symbol {
     Sexp::String(s) => s.into(),
     _ => panic!(),
   }
+}
+
+fn create_implies_rewrite_lt(lhs: Pattern<SymbolLang>, rhs: Pattern<SymbolLang>) -> Rw {
+  // LHS-VARS < RHS-VARS
+  let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+  Rewrite::new(
+    format!("special1"),
+    rhs,
+    ConditionalApplier {
+      applier: pattern_true.clone(),
+      condition: ConditionEqual::new(lhs, pattern_true),
+    },
+  )
+  .unwrap()
+}
+fn create_implies_rewrite_gt(lhs: Pattern<SymbolLang>, rhs: Pattern<SymbolLang>) -> Rw {
+  // LHS-VARS > RHS-VARS
+  let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+  Rewrite::new(
+    format!("special2"),
+    ConditionalSearcher {
+      searcher: lhs.clone(),
+      condition: StrEquality::new(TRUE.clone()),
+    },
+    SeparateRewriteApplier::new(rhs, pattern_true.clone()),
+  )
+  .unwrap()
 }
 
 /// Proof goal
@@ -861,23 +886,59 @@ impl<'a> Goal<'a> {
   pub fn saturate(&mut self, top_lemmas: &BTreeMap<String, Rw>) {
     // RIPPLE-VERIFY
     let mut temp_lemmas = vec![];
-    let ite0 = format!("{}{}", *ITE, 0);
-    let imply_lhs: Pattern<SymbolLang> = format!("({} ?a ?c ?d)", ite0).parse().unwrap();
-    let imply_rhs: Pattern<SymbolLang> = format!("({} ({} ?a ?b) ?c ?d)", ite0, *AND)
-      .parse()
-      .unwrap();
-    let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
-    let impl_lem = Rewrite::new(
-      format!("special1"),
-      imply_rhs,
-      ConditionalApplier {
-        applier: pattern_true.clone(),
-        condition: ConditionEqual::new(imply_lhs, pattern_true),
-      },
-    )
-    .unwrap();
+    // LHS-VARS < RHS-VARS
+    let lem1 = {
+      let ite0 = format!("{}{}", *ITE, 0);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?c {})", ite0, *TRUE).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("({} ({} ?a ?b) ?c {})", ite0, *AND, *TRUE)
+        .parse()
+        .unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special1"),
+        rhs,
+        ConditionalApplier {
+          applier: pattern_true.clone(),
+          condition: ConditionEqual::new(lhs, pattern_true),
+        },
+      )
+      .unwrap()
+    };
+    // LHS-VARS > RHS-VARS
+    let lem2 = {
+      let and = format!("{}", *AND);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", and).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("?a").parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special2"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        SeparateRewriteApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem3 = {
+      let and = format!("{}", *AND);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", and).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special3"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        SeparateRewriteApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
 
-    temp_lemmas.push(&impl_lem);
+    temp_lemmas.push(&lem1);
+    temp_lemmas.push(&lem2);
+    temp_lemmas.push(&lem3);
     let rewrites: Vec<_> = self
       .global_search_state
       .reductions
@@ -2102,8 +2163,10 @@ impl<'a> Goal<'a> {
       println!("memo loc: {:?}", self.local_context);
       for premise in bool_premises {
         for bool_expr_id in bool_expr_ids.clone() {
-          let exprs =
+          let mut exprs =
             get_all_expressions_with_loop(&self.egraph, vec![bool_expr_id, premise.lhs.id]);
+          // we dont want to get TRUE a hundred times
+          exprs.insert(premise.lhs.id, vec![premise.lhs.expr.clone()]);
           let mut memo = BTreeSet::default();
           let atom_exprs = get_atoms(&exprs, &mut memo, premise.lhs.id);
           for bool_expr in exprs.get(&bool_expr_id).unwrap() {
@@ -3600,6 +3663,36 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     let mut new_lemma = HashSet::new();
     new_lemma.insert(_lemma);
     println!("proven lemma yay");
+    // RIPPLE-VERIFY
+    // turn implication into special rules
+    // we cannot support arbitrary currently, only if one side's variables include the other
+    // let lemma_proof_state = proof_state.lemma_proofs.get(&_lemma).unwrap();
+    // let lemma_prop = lemma_proof_state.prop.clone();
+    // let lhs = lemma_prop.eq.lhs;
+    // let rhs = lemma_prop.eq.rhs;
+    // let lhs_vars = sexp_leaves(&lhs);
+    // let rhs_vars = sexp_leaves(&rhs);
+    // let rw: Option<LemmaRewrite<CycleggAnalysis>> = lemma_proof_state.rw;
+    // let lhs_expr: Pattern<SymbolLang> = to_pattern(lhs.expr, is_var);
+    // if lhs_vars.is_subset(&rhs_vars) {
+    //   let rw = create_implies_rewrite_lt(lhs, rhs);
+    //   let mut lemma_rw = LemmaRewrite {
+    //     lhs_to_rhs: None,
+    //     rhs_to_lhs: None,
+    //     lemma_number: _lemma,
+    //     lemma_prop: lemma_prop.clone(),
+    //   };
+    //   lemma_rw.add_to_rewrites(&mut proof_state.lemmas_state.lemma_rewrites);
+    // } else if rhs_vars.is_subset(&lhs_vars) {
+    //   let rw = create_implies_rewrite_gt(lhs, rhs);
+    //   let mut lemma_rw = LemmaRewrite {
+    //     lhs_to_rhs: None,
+    //     rhs_to_lhs: None,
+    //     lemma_number: _lemma,
+    //     lemma_prop: lemma_prop.clone(),
+    //   };
+    //   lemma_rw.add_to_rewrites(&mut proof_state.lemmas_state.lemma_rewrites);
+    // }
 
     while !new_lemma.is_empty() {
       // update those subsumed lemmas

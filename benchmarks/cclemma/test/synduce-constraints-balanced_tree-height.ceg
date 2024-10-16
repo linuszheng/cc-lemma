@@ -60,8 +60,8 @@
   (axiom not (True) False)
   (axiom not (False) True)
   (:: ite0 (-> (Bool Bool Bool) Bool))
-  (let ite0 (True ?x ?y) ?x)
-  (let ite0 (False ?x ?y) ?y)  
+  (axiom ite0 (True ?x ?y) ?x)
+  (axiom ite0 (False ?x ?y) ?y)  
 
 
 

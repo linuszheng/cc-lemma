@@ -402,6 +402,42 @@ where
     egraph.find(eclass) == egraph.find(id)
   }
 }
+#[derive(Debug)]
+pub struct MyConditionEqual<L> {
+  p1: Pattern<L>,
+  p2: Pattern<L>,
+}
+
+impl<L: Language> MyConditionEqual<L> {
+  /// Create a new [`ConditionEqual`] condition given two patterns.
+  pub fn new(p1: Pattern<L>, p2: Pattern<L>) -> Self {
+    MyConditionEqual { p1, p2 }
+  }
+}
+
+impl<L: FromOp> MyConditionEqual<L> {
+  /// Create a ConditionEqual by parsing two pattern strings.
+  ///
+  /// This panics if the parsing fails.
+  pub fn parse(a1: &str, a2: &str) -> Self {
+    Self {
+      p1: a1.parse().unwrap(),
+      p2: a2.parse().unwrap(),
+    }
+  }
+}
+
+impl<L, N> SearchCondition<L, N> for MyConditionEqual<L>
+where
+  L: Language,
+  N: Analysis<L>,
+{
+  fn check(&self, egraph: &EGraph<L, N>, _eclass: Id, subst: &Subst) -> bool {
+    // TODO RIPPLE-VERIFY
+    // DONT USE THIS UNTIL I IMPLEMENT IT
+    false
+  }
+}
 
 pub struct DestructiveApplier {
   searcher: Pattern<SymbolLang>,
@@ -438,6 +474,47 @@ where
       ids.push(eclass);
     }
     ids
+  }
+
+  fn get_pattern_ast(&self) -> Option<&PatternAst<SymbolLang>> {
+    egg::Applier::<SymbolLang, N>::get_pattern_ast(&self.applier)
+  }
+
+  fn vars(&self) -> Vec<Var> {
+    egg::Applier::<SymbolLang, N>::vars(&self.applier)
+  }
+}
+
+pub struct SeparateRewriteApplier {
+  searcher: Pattern<SymbolLang>,
+  applier: Pattern<SymbolLang>,
+}
+
+impl SeparateRewriteApplier {
+  pub fn new(searcher: Pattern<SymbolLang>, applier: Pattern<SymbolLang>) -> Self {
+    Self { searcher, applier }
+  }
+}
+
+impl<N> Applier<SymbolLang, N> for SeparateRewriteApplier
+where
+  N: Analysis<SymbolLang>,
+{
+  fn apply_one(
+    &self,
+    egraph: &mut egg::EGraph<SymbolLang, N>,
+    eclass: Id,
+    subst: &Subst,
+    searcher_ast: Option<&PatternAst<SymbolLang>>,
+    rule_name: Symbol,
+  ) -> Vec<Id> {
+    let (from, did_something) =
+      egraph.union_instantiations(&self.searcher.ast, &self.applier.ast, subst, rule_name);
+    if did_something {
+      vec![from]
+    } else {
+      vec![]
+    }
   }
 
   fn get_pattern_ast(&self) -> Option<&PatternAst<SymbolLang>> {
