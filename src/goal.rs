@@ -442,6 +442,7 @@ impl ETermEquation {
 pub struct LemmaRewrite<A> {
   pub lhs_to_rhs: Option<(String, Rewrite<SymbolLang, A>)>,
   pub rhs_to_lhs: Option<(String, Rewrite<SymbolLang, A>)>,
+  pub implies_rw: Option<(String, Rewrite<SymbolLang, A>)>,
   pub lemma_number: usize,
   pub lemma_prop: Prop,
 }
@@ -450,12 +451,14 @@ impl<A: Analysis<SymbolLang> + Clone> LemmaRewrite<A> {
   pub fn new(
     lhs_to_rhs: Option<(String, Rewrite<SymbolLang, A>)>,
     rhs_to_lhs: Option<(String, Rewrite<SymbolLang, A>)>,
+    implies_rw: Option<(String, Rewrite<SymbolLang, A>)>,
     lemma_number: usize,
     lemma_prop: Prop,
   ) -> Self {
     Self {
       lhs_to_rhs,
       rhs_to_lhs,
+      implies_rw,
       lemma_number,
       lemma_prop,
     }
@@ -487,6 +490,9 @@ impl<A: Analysis<SymbolLang> + Clone> LemmaRewrite<A> {
       rewrites.entry(name.clone()).or_insert(rw.clone());
     }
     if let Some((name, rw)) = self.rhs_to_lhs.as_ref() {
+      rewrites.entry(name.clone()).or_insert(rw.clone());
+    }
+    if let Some((name, rw)) = self.implies_rw.as_ref() {
       rewrites.entry(name.clone()).or_insert(rw.clone());
     }
   }
@@ -1034,7 +1040,13 @@ impl<'a> Goal<'a> {
             exclude_wildcards,
           )
         } else {
-          self.make_lemma_rewrite_type_only(lhs_expr, rhs_expr, lemma_number, exclude_wildcards)
+          self.make_lemma_rewrite_type_only(
+            lhs_expr,
+            rhs_expr,
+            lemma_number,
+            exclude_wildcards,
+            None,
+          )
         };
 
         if let Some(lemma_rw) = lemma_rw_opt {
@@ -1146,6 +1158,7 @@ impl<'a> Goal<'a> {
     let mut lemma_rw = LemmaRewrite {
       lhs_to_rhs: None,
       rhs_to_lhs: None,
+      implies_rw: None,
       lemma_number,
       lemma_prop: Prop::new(rewrite_eq, params.clone()),
     };
@@ -1199,6 +1212,7 @@ impl<'a> Goal<'a> {
     rhs_expr: &Expr,
     lemma_number: usize,
     exclude_wildcards: bool,
+    implies_rw: Option<Rw>,
   ) -> Option<LemmaRewrite<CycleggAnalysis>> {
     let is_var = |v| self.local_context.contains_key(v);
 
@@ -1260,6 +1274,7 @@ impl<'a> Goal<'a> {
     let mut lemma_rw = LemmaRewrite {
       lhs_to_rhs: None,
       rhs_to_lhs: None,
+      implies_rw: None,
       lemma_number,
       lemma_prop: Prop::new(rewrite_eq, params.clone()),
     };
@@ -1291,7 +1306,14 @@ impl<'a> Goal<'a> {
       );
       lemma_rw.rhs_to_lhs = Some(rhs_to_lhs);
     }
-    let has_lemma_rw = lemma_rw.lhs_to_rhs.is_some() || lemma_rw.rhs_to_lhs.is_some();
+
+    if let Some(rw) = implies_rw {
+      lemma_rw.implies_rw = Some((format!("{}", lemma_name.clone()), rw));
+    }
+
+    let has_lemma_rw = lemma_rw.lhs_to_rhs.is_some()
+      || lemma_rw.rhs_to_lhs.is_some()
+      || lemma_rw.implies_rw.is_some();
     if !has_lemma_rw {
       warn!("cannot create a lemma from {} and {}", lhs, rhs);
       None
@@ -1354,6 +1376,7 @@ impl<'a> Goal<'a> {
     let mut lemma_rw = LemmaRewrite {
       lhs_to_rhs: None,
       rhs_to_lhs: None,
+      implies_rw: None,
       lemma_number,
       lemma_prop: Prop::new(rewrite_eq, params.clone()),
     };
@@ -2090,18 +2113,14 @@ impl<'a> Goal<'a> {
     false
   }
 
-  /// Search for cc (concrete correspondence) lemmas.
-  ///
-  /// These are lemmas we propose from subterms in the e-graph that our concrete
-  /// analysis deems equal on some set of random terms.
-  fn search_for_cc_lemmas(&mut self, timer: &Timer, lemmas_state: &mut LemmasState) -> Vec<Prop> {
+  // TODO RUN THIS AT THE RIGHT TIME - BEFORE ANY BOOL CONDITIONAL CASE SPLITS
+  fn search_for_implies_lemmas(
+    &mut self,
+    timer: &Timer,
+    lemmas_state: &mut LemmasState,
+  ) -> Vec<Prop> {
     // RIPPLE-VERIFY-CONFIG {
-    let FILTER_BY_SEMANTIC_DECOMP = false;
-    let ADD_OUTER_BY_SEMANTIC_DECOMP = false;
-    let RELAX_FILTER_FOR_WAVE_RULES = false;
-    let RELAX_FILTER_FOR_FERT = true;
     let ADD_PREMISE_IMPLICATIONS = true;
-    let TURN_CC_LEMMAS_OFF = true;
     // } RIPPLE-VERIFY-CONFIG
     let mut lemmas = vec![];
     self.egraph.analysis.cvec_analysis.saturate();
@@ -2166,35 +2185,22 @@ impl<'a> Goal<'a> {
           let mut exprs =
             get_all_expressions_with_loop(&self.egraph, vec![bool_expr_id, premise.lhs.id]);
           // we dont want to get TRUE a hundred times
-          exprs.insert(premise.lhs.id, vec![premise.lhs.expr.clone()]);
           let mut memo = BTreeSet::default();
           let atom_exprs = get_atoms(&exprs, &mut memo, premise.lhs.id);
           for bool_expr in exprs.get(&bool_expr_id).unwrap() {
             for atom_expr in atom_exprs.clone() {
-              // println!("atom: {:?}", atom_expr);
-              // println!(
-              //   "stats: {} {}",
-              //   atom_expr.as_ref().len(),
-              //   !self.is_reducible(&atom_expr)
-              // );
-              // println!(
-              //   "bool expr: {:?}   {}",
-              //   bool_expr,
-              //   !self.is_reducible(&bool_expr)
-              // );
-              // println!(
-              //   "var set bool_expr: {:?}",
-              //   var_set(&to_pattern(&bool_expr, is_var))
-              // );
-              // println!(
-              //   "var set atom_expr: {:?}",
-              //   var_set(&to_pattern(&atom_expr, is_var))
-              // );
-              if var_set(&to_pattern(&bool_expr, is_var))
-                .intersection(&var_set(&to_pattern(&atom_expr, is_var)))
+              let lhs_pat = to_pattern(&atom_expr, is_var);
+              let rhs_pat = to_pattern(&bool_expr, is_var);
+              let lhs_vars = var_set(&lhs_pat);
+              let rhs_vars = var_set(&rhs_pat);
+              let var_sets_good = lhs_vars
+                .intersection(&rhs_vars)
                 .collect::<Vec<&Var>>()
                 .len()
                 >= 1
+                && (lhs_vars.is_subset(&rhs_vars) || rhs_vars.is_subset(&lhs_vars));
+              // this could be changed in the future to support arbitrary interpolations
+              if var_sets_good
                 && !self.is_reducible(bool_expr)
                 && !self.is_reducible(&atom_expr)
                 && *bool_expr != atom_expr
@@ -2221,11 +2227,20 @@ impl<'a> Goal<'a> {
                   });
 
                   let lemma_number = 0; // this is not used
+                                        // this could be changed in the future for arb interpolation
+                  let implies_rw = {
+                    if lhs_vars.is_subset(&rhs_vars) {
+                      create_implies_rewrite_lt(lhs_pat.clone(), rhs_pat.clone())
+                    } else {
+                      create_implies_rewrite_gt(lhs_pat.clone(), rhs_pat.clone())
+                    }
+                  };
                   let lemma_rw_opt = self.make_lemma_rewrite_type_only(
                     &implies_expr,
                     &true_expr,
                     lemma_number,
                     true,
+                    Some(implies_rw),
                   );
                   if let Some(lemma_rw) = lemma_rw_opt {
                     println!("adding lemma: {}", lemma_rw.lemma_prop);
@@ -2248,6 +2263,31 @@ impl<'a> Goal<'a> {
       }
       // }
     }
+    lemmas
+  }
+
+  fn search_for_cc_lemmas(&mut self, timer: &Timer, lemmas_state: &mut LemmasState) -> Vec<Prop> {
+    // RIPPLE-VERIFY-CONFIG {
+    let FILTER_BY_SEMANTIC_DECOMP = false;
+    let ADD_OUTER_BY_SEMANTIC_DECOMP = false;
+    let RELAX_FILTER_FOR_WAVE_RULES = false;
+    let RELAX_FILTER_FOR_FERT = true;
+    let ADD_PREMISE_IMPLICATIONS = true;
+    let TURN_CC_LEMMAS_OFF = true;
+    // } RIPPLE-VERIFY-CONFIG
+    let mut lemmas = vec![];
+    self.egraph.analysis.cvec_analysis.saturate();
+    let resolved_lhs_id = self.egraph.find(self.eq.lhs.id);
+    let resolved_rhs_id = self.egraph.find(self.eq.rhs.id);
+    if CONFIG.verbose {
+      println!("lhs: ");
+      print_expressions_in_eclass(&self.egraph, resolved_lhs_id);
+      println!("rhs: ");
+      print_expressions_in_eclass(&self.egraph, resolved_rhs_id);
+      // print_all_expressions_in_egraph(&self.egraph, 7);
+    }
+    let class_ids: Vec<Id> = self.egraph.classes().map(|c| c.id).collect();
+
     if !self.is_implication() {
       for class_1_id in &class_ids {
         for class_2_id in &class_ids {
@@ -3004,8 +3044,13 @@ impl<'a> LemmaProofState<'a> {
   ) -> Self {
     let lemma_name = get_lemma_name(lemma_number);
     let mut goal = Goal::top(&lemma_name, &prop, premise, global_search_state);
-    let lemma_rw_opt =
-      goal.make_lemma_rewrite_type_only(&goal.eq.lhs.expr, &goal.eq.rhs.expr, lemma_number, false);
+    let lemma_rw_opt = goal.make_lemma_rewrite_type_only(
+      &goal.eq.lhs.expr,
+      &goal.eq.rhs.expr,
+      lemma_number,
+      false,
+      None,
+    );
     let lemma_rw_opt_no_analysis =
       goal.make_lemma_rewrite_unchecked(&goal.eq.lhs.expr, &goal.eq.rhs.expr, lemma_number, false);
     let mut outcome = goal.cvecs_valid().and_then(|is_valid| {
