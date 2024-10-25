@@ -126,10 +126,12 @@ pub fn mangle_sexp(sexp: &Sexp) -> Sexp {
 lazy_static! {
   pub static ref BOOL_TYPE: String = mangle_name("Bool");
   pub static ref ITE: String = mangle_name("ite");
+  pub static ref ITE_MAX_N: usize = 5;
   pub static ref TRUE: String = mangle_name("True");
   pub static ref FALSE: String = mangle_name("False");
   pub static ref NOT: String = mangle_name("not");
   pub static ref AND: String = mangle_name("and");
+  pub static ref OR: String = mangle_name("or");
 }
 pub const ARROW: &str = "->";
 pub const APPLY: &str = "$";

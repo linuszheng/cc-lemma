@@ -402,43 +402,6 @@ where
     egraph.find(eclass) == egraph.find(id)
   }
 }
-#[derive(Debug)]
-pub struct MyConditionEqual<L> {
-  p1: Pattern<L>,
-  p2: Pattern<L>,
-}
-
-impl<L: Language> MyConditionEqual<L> {
-  /// Create a new [`ConditionEqual`] condition given two patterns.
-  pub fn new(p1: Pattern<L>, p2: Pattern<L>) -> Self {
-    MyConditionEqual { p1, p2 }
-  }
-}
-
-impl<L: FromOp> MyConditionEqual<L> {
-  /// Create a ConditionEqual by parsing two pattern strings.
-  ///
-  /// This panics if the parsing fails.
-  pub fn parse(a1: &str, a2: &str) -> Self {
-    Self {
-      p1: a1.parse().unwrap(),
-      p2: a2.parse().unwrap(),
-    }
-  }
-}
-
-impl<L, N> SearchCondition<L, N> for MyConditionEqual<L>
-where
-  L: Language,
-  N: Analysis<L>,
-{
-  fn check(&self, egraph: &EGraph<L, N>, _eclass: Id, subst: &Subst) -> bool {
-    // TODO RIPPLE-VERIFY
-    // DONT USE THIS UNTIL I IMPLEMENT IT
-    false
-  }
-}
-
 pub struct DestructiveApplier {
   searcher: Pattern<SymbolLang>,
   applier: Pattern<SymbolLang>,

@@ -2323,120 +2323,58 @@ impl<'a> Goal<'a> {
       print_expressions_in_eclass(&self.egraph, resolved_rhs_id);
       // print_all_expressions_in_egraph(&self.egraph, 7);
     }
-    let class_ids: Vec<Id> = self.egraph.classes().map(|c| c.id).collect();
-
-    // RIPPLE-VERIFY-TODO: reuse from try_goal if we want to use it here
-    // let (blocking_vars, blocking_exprs) = self.find_blocking(timer);
-
-    // do premise implications here, before anything else
-    // RIPPLE-VERIFY-TODO
+    let is_bool = |id: &&Id| {
+      let class_op = self.egraph[**id].data.canonical_form_data.get_enode().op;
+      if class_op == "$".into() {
+        false
+      } else {
+        // RIPPLE-VERIFY-TODO: debug when this fails
+        let res = self
+          .global_search_state
+          .context
+          .get(&class_op)
+          .or_else(|| self.local_context.get(&class_op));
+        if let Some(r) = res {
+          let (args_ty, class_ty) = r.args_ret();
+          !(args_ty.iter().all(|x| x.to_string() == *BOOL_TYPE))
+            && class_ty.to_string() == *BOOL_TYPE
+        } else {
+          false
+        }
+      }
+    };
+    let is_interesting = |expr: RecExpr<SymbolLang>| {
+      let op2 = expr.as_ref().last().unwrap();
+      op2.op.as_str() == *AND || op2.op.as_str() == *OR
+    };
     if ADD_PREMISE_IMPLICATIONS {
+      let class_ids: Vec<Id> = self.egraph.classes().map(|c| c.id).collect();
       let true_id = self.egraph.add(SymbolLang::leaf(TRUE.clone()));
       let false_id = self.egraph.add(SymbolLang::leaf(FALSE.clone()));
       self.egraph.rebuild();
-      // if !(resolved_lhs_id == true_id
-      //   || resolved_lhs_id == false_id
-      //   || resolved_rhs_id == true_id
-      //   || resolved_rhs_id == false_id)
-      // {
-      // let bool_premises = self.premises.iter().filter(|p| {
-      //   self.egraph.find(p.lhs.id) == true_id || self.egraph.find(p.lhs.id) == false_id
-      // });
-      // change this to ANY ITE
-      let searcher = Pattern::from_str(&*format!("({}1 ?a ?b ?c)", *ITE)).unwrap();
-      let ite_exprs = searcher.search(&self.egraph);
-      let bool_premises: Vec<Id> = ite_exprs
-        .iter()
-        .flat_map(|search_matches| {
-          search_matches
-            .substs
-            .clone()
-            .into_iter()
-            .map(|subst| subst.get(Var::from_str("?a").unwrap()).unwrap().clone())
-        })
-        .collect();
-      println!("bool premises:");
-
-      bool_premises
-        .clone()
-        .into_iter()
-        .for_each(|x| print_expressions_in_eclass(&self.egraph, x));
       let bool_expr_ids: Vec<Id> = class_ids
         .iter()
-        .filter(|id| {
-          let class_op = self.egraph[**id].data.canonical_form_data.get_enode().op;
-          if class_op == "$".into() {
-            false
-          } else {
-            // RIPPLE-VERIFY-TODO: debug when this fails
-            let res = self
-              .global_search_state
-              .context
-              .get(&class_op)
-              .or_else(|| self.local_context.get(&class_op));
-            if let Some(r) = res {
-              let (args_ty, class_ty) = r.args_ret();
-              !(args_ty.iter().all(|x| x.to_string() == *BOOL_TYPE))
-                && class_ty.to_string() == *BOOL_TYPE
-            } else {
-              false
-            }
-          }
-        })
+        .filter(|id| is_bool(id))
         .map(|id| self.egraph.find(*id))
         .collect();
-
       let is_var = |v: &Symbol| self.local_context.contains_key(&v.clone());
-      let exprs = get_all_expressions_with_loop(
-        &self.egraph,
-        bool_expr_ids
-          .clone()
-          .into_iter()
-          .chain(bool_premises.clone())
-          .collect(),
-      );
-      // TEMPORARY:
-      let bool_premises: Vec<Id> = exprs.clone().into_iter().map(|(a, b)| a).collect();
-      for premise in bool_premises {
-        println!("looking at premise:");
-        print_expressions_in_eclass(&self.egraph, premise);
-        for bool_expr_id in bool_expr_ids.clone() {
-          // we dont want to get TRUE a hundred times
-          // let mut memo = BTreeSet::default();
-          // let atom_exprs: BTreeSet<RecExpr<SymbolLang>> =
-          //   get_atoms(&self.egraph, &mut memo, premise);
-          // TEMPORARY:
-          let atom_exprs = get_all_expressions(&self.egraph, vec![premise])
-            .get(&premise)
-            .unwrap()
-            .clone();
-          for x in &atom_exprs {
-            println!("atom expr: {}", x);
-          }
-          for bool_expr in exprs.get(&bool_expr_id).unwrap() {
-            let op2 = bool_expr.as_ref().last().unwrap();
-            if op2.op.as_str() == *AND || op2.op.as_str() == *AND
-            // || op1.op.as_str() == *OR
-            // || op2.op.as_str() == *OR
-            {
-              continue;
-            }
-            for atom_expr in atom_exprs.clone() {
-              let op1 = atom_expr.as_ref().last().unwrap();
-              if op1.op.as_str() == *AND || op1.op.as_str() == *AND
-              // || op1.op.as_str() == *OR
-              // || op2.op.as_str() == *OR
-              {
-                continue;
-              }
-              let lhs_pat = to_pattern(&atom_expr, is_var);
-              let rhs_pat = to_pattern(&bool_expr, is_var);
+      let exprs_lhs = get_all_expressions_with_loop(&self.egraph, bool_expr_ids.clone())
+        .iter()
+        .map(|(id, vec)| (id, vec.iter().filter(|expr| is_interesting(**expr))));
+      let exprs_rhs = exprs_lhs.clone();
+      for (lhs_id, lhs_reclist) in exprs_lhs {
+        for (rhs_id, rhs_reclist) in exprs_rhs.clone() {
+          for lhs_rec in lhs_reclist {
+            for rhs_rec in rhs_reclist.clone() {
+              let lhs_pat = to_pattern(&lhs_rec, is_var);
+              let rhs_pat = to_pattern(&rhs_rec, is_var);
               let lhs_vars = var_set(&lhs_pat);
               let rhs_vars = var_set(&rhs_pat);
+              // make this more efficient so we do intersection O(n) instead of O(n^2) times
               println!("computing intersection");
-              println!("{}", bool_expr);
-              println!("{}", atom_expr);
-              let var_sets_good = lhs_vars
+              println!("{}", lhs_rec);
+              println!("{}", rhs_rec);
+              let var_sets_good: bool = lhs_vars
                 .intersection(&rhs_vars)
                 .collect::<Vec<&Var>>()
                 .len()
@@ -2444,12 +2382,11 @@ impl<'a> Goal<'a> {
                 && (lhs_vars.is_subset(&rhs_vars) || rhs_vars.is_subset(&lhs_vars));
               // this could be changed in the future to support arbitrary interpolations
               if var_sets_good
-                && !self.is_reducible(bool_expr)
-                && !self.is_reducible(&atom_expr)
-                && *bool_expr != atom_expr
-                && atom_expr.as_ref().len() > 1
+                && !self.is_reducible(lhs_rec)
+                && !self.is_reducible(rhs_rec)
+                && *lhs_rec != *rhs_rec
+                && lhs_rec.as_ref().len() > 1
               {
-                // println!("passed");
                 lemmas.extend(find_generalizations_impl_n(
                   prop,
                   global_context,
