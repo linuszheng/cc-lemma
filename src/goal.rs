@@ -395,6 +395,119 @@ fn find_generalizations_prop(
   output
 }
 
+fn construct_impl() {
+  let not_op = SymbolLang::new(format!("{}", *NOT), vec![Id::from(0)]);
+  let bool_expr_not = not_op.join_recexprs(|id| bool_expr);
+  println!("maybe: {}=?=>{}", atom_expr, bool_expr);
+  println!("maybe: {}=?=>{}", atom_expr, bool_expr_not);
+  let ite_str = format!("{}{}", *ITE, 0);
+  let true_expr = RecExpr::from_str(&TRUE).unwrap();
+  let implies_op = SymbolLang::new(ite_str, vec![Id::from(0), Id::from(1), Id::from(2)]);
+  for res_expr in vec![bool_expr, &bool_expr_not] {
+    let implies_expr = implies_op.join_recexprs(|id| {
+      if id == Id::from(0) {
+        &atom_expr
+      } else if id == Id::from(1) {
+        res_expr
+      } else {
+        &true_expr
+      }
+    });
+
+    let lemma_number = 0; // this is not used
+                          // this could be changed in the future for arb interpolation
+    let implies_rw = {
+      if lhs_vars.is_subset(&rhs_vars) {
+        create_implies_rewrite_lt(lhs_pat.clone(), rhs_pat.clone(), res_expr == bool_expr)
+      } else {
+        create_implies_rewrite_gt(lhs_pat.clone(), rhs_pat.clone(), res_expr == bool_expr)
+      }
+    };
+    let lemma_rw_opt = self.make_lemma_rewrite_type_only(
+      &implies_expr,
+      &true_expr,
+      lemma_number,
+      true,
+      Some(implies_rw),
+    );
+    if let Some(lemma_rw) = lemma_rw_opt {
+      println!("adding lemma: {}", lemma_rw.lemma_prop);
+      // RIPPLE-VERIFY-CONFIG generalizations
+      lemmas.extend(find_generalizations_impl_n(
+        &lemma_rw.lemma_prop,
+        self.global_search_state.context,
+        self.name.clone(),
+        2,
+      ));
+      // or not
+      // lemmas.push(lemma_rw.lemma_prop);
+    }
+  }
+}
+
+fn find_generalizations_impl(
+  prop: &Prop,
+  global_context: &Context,
+  fresh_name: String,
+) -> Vec<Prop> {
+  println!("find generalizations prop");
+  let lhs_nontrivial_subexprs = nontrivial_sexp_subexpressions_containing_vars(&prop.eq.lhs);
+  let rhs_nontrivial_subexprs = nontrivial_sexp_subexpressions_containing_vars(&prop.eq.rhs);
+  let mut output = vec![];
+  // println!("Trying to generalize {} = {}", raw_eq.eq.lhs, raw_eq.eq.rhs);
+  for (rhs_subexpr_str, subexpr) in &rhs_nontrivial_subexprs {
+    let op = match subexpr {
+      Sexp::Empty => unreachable!(),
+      // This shouldn't happen unless we generalize a constant
+      Sexp::String(s) => s,
+      Sexp::List(list) => list.first().unwrap().string().unwrap(),
+    };
+    // HACK: Skip partial applications because they have no type
+    if op == "$" {
+      continue;
+    }
+    let op_ty = &global_context[&Symbol::new(op)];
+    // Again, we assume that the expression here is fully applied, i.e. it is not a $
+    let (_, ty) = op_ty.args_ret();
+    let var_symb = Symbol::new(&fresh_name);
+    let generalized_var = Sexp::String(fresh_name.clone());
+    let new_rhs = substitute_sexp(&prop.eq.rhs, subexpr, &generalized_var);
+    let mut new_lhs_maybe = None;
+    // if lhs is a constant then we only need to generalize one side
+    // watch out - generalizing 1
+    if sexp_is_constructor(&prop.eq.lhs) {
+      new_lhs_maybe = Some(prop.eq.lhs.clone());
+    }
+    // else we do what CCLemma already does
+    else if lhs_nontrivial_subexprs.get(rhs_subexpr_str).is_some() {
+      // should be the same subexpr so we don't need to bind it
+      new_lhs_maybe = Some(substitute_sexp(&prop.eq.lhs, subexpr, &generalized_var));
+    }
+    if let Some(new_lhs) = new_lhs_maybe {
+      // FIXME: hacky way to find variables
+      let lhs_vars = sexp_leaves(&new_lhs);
+      let rhs_vars = sexp_leaves(&new_rhs);
+      let mut new_params = prop.params.clone();
+      // Only keep the vars that remain after substituting.
+      new_params.retain(|(var, _ty)| {
+        lhs_vars.contains(&var.to_string()) || rhs_vars.contains(&var.to_string())
+      });
+      new_params.push((var_symb, ty));
+      // println!("Generalization candidate LHS: {}", new_lhs);
+      // println!("Generalization candidate RHS: {}", new_rhs);
+      output.push(Prop::new(Equation::new(new_lhs, new_rhs), new_params));
+      // let temp = find_generalizations_prop(
+      //   &Prop::new(Equation::new(new_lhs, new_rhs), new_params),
+      //   global_context,
+      //   fresh_name.clone(),
+      // );
+      // output.extend(temp);
+    }
+  }
+  // RIPPLE-VERIFY-TODO: do the generalization for the other side
+  output
+}
+
 fn find_generalizations_prop_n(
   prop: &Prop,
   global_context: &Context,
@@ -405,6 +518,25 @@ fn find_generalizations_prop_n(
   for i in 0..n {
     for p in output.clone() {
       output.extend(find_generalizations_prop(
+        &p,
+        global_context,
+        fresh_name.clone(),
+      ));
+    }
+  }
+  output
+}
+
+fn find_generalizations_impl_n(
+  prop: &Prop,
+  global_context: &Context,
+  fresh_name: String,
+  n: usize,
+) -> Vec<Prop> {
+  let mut output = vec![prop.clone()];
+  for i in 0..n {
+    for p in output.clone() {
+      output.extend(find_generalizations_impl(
         &p,
         global_context,
         fresh_name.clone(),
@@ -2318,62 +2450,12 @@ impl<'a> Goal<'a> {
                 && atom_expr.as_ref().len() > 1
               {
                 // println!("passed");
-                let not_op = SymbolLang::new(format!("{}", *NOT), vec![Id::from(0)]);
-                let bool_expr_not = not_op.join_recexprs(|id| bool_expr);
-                println!("maybe: {}=?=>{}", atom_expr, bool_expr);
-                println!("maybe: {}=?=>{}", atom_expr, bool_expr_not);
-                let ite_str = format!("{}{}", *ITE, 0);
-                let true_expr = RecExpr::from_str(&TRUE).unwrap();
-                let implies_op =
-                  SymbolLang::new(ite_str, vec![Id::from(0), Id::from(1), Id::from(2)]);
-                for res_expr in vec![bool_expr, &bool_expr_not] {
-                  let implies_expr = implies_op.join_recexprs(|id| {
-                    if id == Id::from(0) {
-                      &atom_expr
-                    } else if id == Id::from(1) {
-                      res_expr
-                    } else {
-                      &true_expr
-                    }
-                  });
-
-                  let lemma_number = 0; // this is not used
-                                        // this could be changed in the future for arb interpolation
-                  let implies_rw = {
-                    if lhs_vars.is_subset(&rhs_vars) {
-                      create_implies_rewrite_lt(
-                        lhs_pat.clone(),
-                        rhs_pat.clone(),
-                        res_expr == bool_expr,
-                      )
-                    } else {
-                      create_implies_rewrite_gt(
-                        lhs_pat.clone(),
-                        rhs_pat.clone(),
-                        res_expr == bool_expr,
-                      )
-                    }
-                  };
-                  let lemma_rw_opt = self.make_lemma_rewrite_type_only(
-                    &implies_expr,
-                    &true_expr,
-                    lemma_number,
-                    true,
-                    Some(implies_rw),
-                  );
-                  if let Some(lemma_rw) = lemma_rw_opt {
-                    println!("adding lemma: {}", lemma_rw.lemma_prop);
-                    // RIPPLE-VERIFY-CONFIG generalizations
-                    lemmas.extend(find_generalizations_prop_n(
-                      &lemma_rw.lemma_prop,
-                      self.global_search_state.context,
-                      self.name.clone(),
-                      2,
-                    ));
-                    // or not
-                    // lemmas.push(lemma_rw.lemma_prop);
-                  }
-                }
+                lemmas.extend(find_generalizations_impl_n(
+                  prop,
+                  global_context,
+                  fresh_name,
+                  n,
+                ));
               }
               // }
             }
