@@ -395,58 +395,9 @@ fn find_generalizations_prop(
   output
 }
 
-fn construct_impl() {
-  let not_op = SymbolLang::new(format!("{}", *NOT), vec![Id::from(0)]);
-  let bool_expr_not = not_op.join_recexprs(|id| bool_expr);
-  println!("maybe: {}=?=>{}", atom_expr, bool_expr);
-  println!("maybe: {}=?=>{}", atom_expr, bool_expr_not);
-  let ite_str = format!("{}{}", *ITE, 0);
-  let true_expr = RecExpr::from_str(&TRUE).unwrap();
-  let implies_op = SymbolLang::new(ite_str, vec![Id::from(0), Id::from(1), Id::from(2)]);
-  for res_expr in vec![bool_expr, &bool_expr_not] {
-    let implies_expr = implies_op.join_recexprs(|id| {
-      if id == Id::from(0) {
-        &atom_expr
-      } else if id == Id::from(1) {
-        res_expr
-      } else {
-        &true_expr
-      }
-    });
-
-    let lemma_number = 0; // this is not used
-                          // this could be changed in the future for arb interpolation
-    let implies_rw = {
-      if lhs_vars.is_subset(&rhs_vars) {
-        create_implies_rewrite_lt(lhs_pat.clone(), rhs_pat.clone(), res_expr == bool_expr)
-      } else {
-        create_implies_rewrite_gt(lhs_pat.clone(), rhs_pat.clone(), res_expr == bool_expr)
-      }
-    };
-    let lemma_rw_opt = self.make_lemma_rewrite_type_only(
-      &implies_expr,
-      &true_expr,
-      lemma_number,
-      true,
-      Some(implies_rw),
-    );
-    if let Some(lemma_rw) = lemma_rw_opt {
-      println!("adding lemma: {}", lemma_rw.lemma_prop);
-      // RIPPLE-VERIFY-CONFIG generalizations
-      lemmas.extend(find_generalizations_impl_n(
-        &lemma_rw.lemma_prop,
-        self.global_search_state.context,
-        self.name.clone(),
-        2,
-      ));
-      // or not
-      // lemmas.push(lemma_rw.lemma_prop);
-    }
-  }
-}
-
 fn find_generalizations_impl(
-  prop: &Prop,
+  lhs_rec: RecExpr<SymbolLang>,
+  rhs_rec: RecExpr<SymbolLang>,
   global_context: &Context,
   fresh_name: String,
 ) -> Vec<Prop> {
@@ -505,44 +456,6 @@ fn find_generalizations_impl(
     }
   }
   // RIPPLE-VERIFY-TODO: do the generalization for the other side
-  output
-}
-
-fn find_generalizations_prop_n(
-  prop: &Prop,
-  global_context: &Context,
-  fresh_name: String,
-  n: usize,
-) -> Vec<Prop> {
-  let mut output = vec![prop.clone()];
-  for i in 0..n {
-    for p in output.clone() {
-      output.extend(find_generalizations_prop(
-        &p,
-        global_context,
-        fresh_name.clone(),
-      ));
-    }
-  }
-  output
-}
-
-fn find_generalizations_impl_n(
-  prop: &Prop,
-  global_context: &Context,
-  fresh_name: String,
-  n: usize,
-) -> Vec<Prop> {
-  let mut output = vec![prop.clone()];
-  for i in 0..n {
-    for p in output.clone() {
-      output.extend(find_generalizations_impl(
-        &p,
-        global_context,
-        fresh_name.clone(),
-      ));
-    }
-  }
   output
 }
 
@@ -1068,8 +981,14 @@ impl<'a> Goal<'a> {
       Sexp::List(children) => {
         let mut child_iter = children.iter();
         let f = child_iter.next().unwrap().clone();
-        let ite_str = format!("{}{}", *ITE, 0);
-        f == Sexp::String(ite_str)
+        // RIPPLE-VERIFY-TODO turn into regex
+        for n in 0..*ITE_MAX_N {
+          let ite_str = format!("{}{}", *ITE, n);
+          if f == Sexp::String(ite_str) {
+            return true;
+          }
+        }
+        return false;
       }
       _ => false,
     }
@@ -2284,6 +2203,61 @@ impl<'a> Goal<'a> {
     return false;
   }
 
+  fn construct_implication(
+    &mut self,
+    lhs_rec: RecExpr<SymbolLang>,
+    rhs_rec: RecExpr<SymbolLang>,
+  ) -> Vec<Prop> {
+    let not_op = SymbolLang::new(format!("{}", *NOT), vec![Id::from(0)]);
+    let rhs_rec_not = not_op.join_recexprs(|id| rhs_rec);
+    println!("maybe: {}=?=>{}", lhs_rec, rhs_rec);
+    println!("maybe: {}=?=>{}", lhs_rec, rhs_rec_not);
+    let ite_str = format!("{}{}", *ITE, 0);
+    let true_expr = RecExpr::from_str(&TRUE).unwrap();
+    let implies_op = SymbolLang::new(ite_str, vec![Id::from(0), Id::from(1), Id::from(2)]);
+    let lemmas = vec![];
+    for res_expr in vec![rhs_rec, rhs_rec_not] {
+      let implies_expr = implies_op.join_recexprs(|id| {
+        if id == Id::from(0) {
+          &lhs_rec
+        } else if id == Id::from(1) {
+          &res_expr
+        } else {
+          &true_expr
+        }
+      });
+
+      let lemma_number = 0; // this is not used
+                            // this could be changed in the future for arb interpolation
+      let implies_rw = {
+        if lhs_vars.is_subset(&rhs_vars) {
+          create_implies_rewrite_lt(lhs_pat.clone(), rhs_pat.clone(), res_expr == bool_expr)
+        } else {
+          create_implies_rewrite_gt(lhs_pat.clone(), rhs_pat.clone(), res_expr == bool_expr)
+        }
+      };
+      let lemma_rw_opt = self.make_lemma_rewrite_type_only(
+        &implies_expr,
+        &true_expr,
+        lemma_number,
+        true,
+        Some(implies_rw),
+      );
+      if let Some(lemma_rw) = lemma_rw_opt {
+        println!("adding lemma: {}", lemma_rw.lemma_prop);
+        // RIPPLE-VERIFY-CONFIG generalizations
+        lemmas.extend(find_generalizations_impl_n(
+          &lemma_rw.lemma_prop,
+          self.global_search_state.context,
+          self.name.clone(),
+          2,
+        ));
+        // or not
+        // lemmas.push(lemma_rw.lemma_prop);
+      }
+    }
+    lemmas
+  }
   fn check_if_ripple_rule(&mut self, lhs_id: Id, rhs_id: Id) -> bool {
     let is_var = |v: &str| {
       self
@@ -2364,6 +2338,9 @@ impl<'a> Goal<'a> {
       let exprs_rhs = exprs_lhs.clone();
       for (lhs_id, lhs_reclist) in exprs_lhs {
         for (rhs_id, rhs_reclist) in exprs_rhs.clone() {
+          if lhs_id == rhs_id {
+            continue;
+          }
           for lhs_rec in lhs_reclist {
             for rhs_rec in rhs_reclist.clone() {
               let lhs_pat = to_pattern(&lhs_rec, is_var);
@@ -2387,12 +2364,7 @@ impl<'a> Goal<'a> {
                 && *lhs_rec != *rhs_rec
                 && lhs_rec.as_ref().len() > 1
               {
-                lemmas.extend(find_generalizations_impl_n(
-                  prop,
-                  global_context,
-                  fresh_name,
-                  n,
-                ));
+                self.construct_implication(lhs_rec, rhs_rec);
               }
               // }
             }
