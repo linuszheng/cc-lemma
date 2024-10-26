@@ -409,22 +409,22 @@ fn create_implies_equations(
   B -> !A
   */
   let not = Sexp::String(NOT.clone());
-  let ite = Sexp::String(ITE.clone());
-  let not_a = Sexp::List(vec![not.clone(), a.clone()]);
-  let not_b = Sexp::List(vec![not.clone(), b.clone()]);
-  let a_implies_b = Sexp::List(vec![ite.clone(), a.clone(), b.clone()]);
-  let a_implies_not_b = Sexp::List(vec![ite.clone(), a.clone(), not_b]);
-  let b_implies_a = Sexp::List(vec![ite.clone(), b.clone(), a.clone()]);
-  let b_implies_not_a = Sexp::List(vec![ite.clone(), b.clone(), not_a]);
+  let ite = Sexp::String(ITE.clone() + "0");
   let true_sexp = Sexp::String(TRUE.clone());
   let false_sexp = Sexp::String(FALSE.clone());
+  let not_a = Sexp::List(vec![not.clone(), a.clone()]);
+  let not_b = Sexp::List(vec![not.clone(), b.clone()]);
+  let a_implies_b = Sexp::List(vec![ite.clone(), a.clone(), b.clone(), true_sexp.clone()]);
+  let a_implies_not_b = Sexp::List(vec![ite.clone(), a.clone(), not_b, true_sexp.clone()]);
+  let b_implies_a = Sexp::List(vec![ite.clone(), b.clone(), a.clone(), true_sexp.clone()]);
+  let b_implies_not_a = Sexp::List(vec![ite.clone(), b.clone(), not_a, true_sexp.clone()]);
 
   let a_vars = sexp_leaves(&a);
   let b_vars = sexp_leaves(&b);
 
   let mut res = vec![];
   // A IMPLIES B
-  let implies_rw = if a_vars.is_subset(&b_vars) {
+  let implies_rw: Rewrite<SymbolLang, CycleggAnalysis> = if a_vars.is_subset(&b_vars) {
     create_implies_rewrite_lt(a_pat.clone(), b_pat.clone(), true)
   } else {
     create_implies_rewrite_gt(a_pat.clone(), b_pat.clone(), true)
@@ -2463,7 +2463,7 @@ impl<'a> Goal<'a> {
       let class_ids: Vec<Id> = self.egraph.classes().map(|c| c.id).collect();
       let _true_id = self.egraph.add(SymbolLang::leaf(TRUE.clone()));
       let _false_id = self.egraph.add(SymbolLang::leaf(FALSE.clone()));
-      self.egraph.rebuild();
+      self.build_cvecs();
       let bool_expr_ids: Vec<Id> = class_ids
         .iter()
         .filter_map(|id| {
@@ -3319,15 +3319,15 @@ impl<'a> LemmaProofState<'a> {
       goal.make_lemma_rewrite_unchecked(&goal.eq.lhs.expr, &goal.eq.rhs.expr, lemma_number, false);
     let mut outcome = goal.cvecs_valid().and_then(|is_valid| {
       // RIPPLE-VERIFY-PRINT
-      // print_cvec(
-      //   &goal.egraph.analysis.cvec_analysis,
-      //   &goal.egraph[goal.eq.lhs.id].data.cvec_data,
-      // );
-      // print_cvec(
-      //   &goal.egraph.analysis.cvec_analysis,
-      //   &goal.egraph[goal.eq.rhs.id].data.cvec_data,
-      // );
-      // println!("{} cvec is valid = {}", lemma_name, is_valid);
+      print_cvec(
+        &goal.egraph.analysis.cvec_analysis,
+        &goal.egraph[goal.eq.lhs.id].data.cvec_data,
+      );
+      print_cvec(
+        &goal.egraph.analysis.cvec_analysis,
+        &goal.egraph[goal.eq.rhs.id].data.cvec_data,
+      );
+      println!("{} cvec is valid? = {}", lemma_name, is_valid);
       // FIXME: Handle premises in cvecs so that we can reject invalid props
       // with preconditions
       if premise.is_none() && !is_valid {
@@ -3684,8 +3684,13 @@ impl<'a> ProofState<'a> {
         }
         let lemma_number = scheduler.get_lemma_number(&lemma_index);
 
+        println!("looking at {}", lemma_number);
+
         if let Some(lemma_proof_state) = self.lemma_proofs.get(&lemma_number) {
-          //println!("info {} {:?}", lemma_proof_state.prop, lemma_proof_state.outcome);
+          println!(
+            "info {} {:?}",
+            lemma_proof_state.prop, lemma_proof_state.outcome
+          );
           // This lemma has been declared valid/invalid
           if lemma_proof_state.outcome.is_some()
             && lemma_proof_state.outcome != Some(Outcome::Unknown)
@@ -3852,19 +3857,26 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     let _goals = self.goal_graph.get_lemma(0).goals.clone();
     println!("\n\n================= current queue ==============");
     // LIMIT TO 10
-    for info in frontier.iter().take(10) {
+    for info in frontier.clone().into_iter().sorted().rev().take(10) {
       println!("[{}] {}", info.size, info.full_exp);
       println!("  ({}) {}", info.lemma_id, self.prop_map[&info.lemma_id]);
     }
     println!("\n\n");
     // }
+
     if frontier
       .iter()
       .any(|info| self.progress_set.contains(&info.lemma_id))
     {
+      println!("progress set contains: shrink frontier to only that");
       frontier.retain(|info| self.progress_set.contains(&info.lemma_id));
+      for info in frontier.clone().into_iter().sorted().rev().take(10) {
+        println!("[{}] {}", info.size, info.full_exp);
+        println!("  ({}) {}", info.lemma_id, self.prop_map[&info.lemma_id]);
+      }
     }
     if let Some(optimal) = frontier.into_iter().min_by_key(|info| info.size) {
+      println!("next goal with smallest size");
       self.next_goal = Some(optimal.clone());
       if self.progress_set.contains(&optimal.lemma_id) {
         self.progress_set.remove(&optimal.lemma_id);
@@ -3914,7 +3926,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     }
 
     let lemma_state = proof_state.lemma_proofs.get_mut(&lemma_index).unwrap();
-    // println!("outcome: {:?}", lemma_state.outcome);
+    println!("outcome: {:?}", lemma_state.outcome);
     if lemma_state.outcome.is_some() {
       assert_eq!(lemma_state.outcome, Some(Outcome::Invalid));
       self
