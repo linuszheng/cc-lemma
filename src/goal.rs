@@ -8,7 +8,7 @@ use rand::{thread_rng, Rng};
 use std::collections::{BTreeMap, VecDeque};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Display;
-use std::iter::zip;
+use std::iter::{zip, Cycle};
 use std::mem;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -395,67 +395,214 @@ fn find_generalizations_prop(
   output
 }
 
-fn find_generalizations_impl(
-  lhs_rec: RecExpr<SymbolLang>,
-  rhs_rec: RecExpr<SymbolLang>,
+fn create_implies_equations(
+  a: Sexp,
+  b: Sexp,
+  a_pat: Pattern<SymbolLang>,
+  b_pat: Pattern<SymbolLang>,
+) -> Vec<(Equation, Rewrite<SymbolLang, CycleggAnalysis>)> {
+  /*
+  creates 4 equations
+  A -> B
+  A -> !B
+  B -> A
+  B -> !A
+  */
+  let not = Sexp::String(NOT.clone());
+  let ite = Sexp::String(ITE.clone());
+  let not_a = Sexp::List(vec![not.clone(), a.clone()]);
+  let not_b = Sexp::List(vec![not.clone(), b.clone()]);
+  let a_implies_b = Sexp::List(vec![ite.clone(), a.clone(), b.clone()]);
+  let a_implies_not_b = Sexp::List(vec![ite.clone(), a.clone(), not_b]);
+  let b_implies_a = Sexp::List(vec![ite.clone(), b.clone(), a.clone()]);
+  let b_implies_not_a = Sexp::List(vec![ite.clone(), b.clone(), not_a]);
+  let true_sexp = Sexp::String(TRUE.clone());
+  let false_sexp = Sexp::String(FALSE.clone());
+
+  let a_vars = sexp_leaves(&a);
+  let b_vars = sexp_leaves(&b);
+
+  let mut res = vec![];
+  // A IMPLIES B
+  let implies_rw = if a_vars.is_subset(&b_vars) {
+    create_implies_rewrite_lt(a_pat.clone(), b_pat.clone(), true)
+  } else {
+    create_implies_rewrite_gt(a_pat.clone(), b_pat.clone(), true)
+  };
+  let eq = Equation::new(a_implies_b, true_sexp.clone());
+  res.push((eq, implies_rw));
+  // A IMPLIES NOT B
+  let implies_rw = if a_vars.is_subset(&b_vars) {
+    create_implies_rewrite_lt(a_pat.clone(), b_pat.clone(), false)
+  } else {
+    create_implies_rewrite_gt(a_pat.clone(), b_pat.clone(), false)
+  };
+  let eq = Equation::new(a_implies_not_b, true_sexp.clone());
+  res.push((eq, implies_rw));
+  // B IMPLIES A
+  let implies_rw = if b_vars.is_subset(&a_vars) {
+    create_implies_rewrite_lt(b_pat.clone(), a_pat.clone(), true)
+  } else {
+    create_implies_rewrite_gt(b_pat.clone(), a_pat.clone(), true)
+  };
+  let eq = Equation::new(b_implies_a, true_sexp.clone());
+  res.push((eq, implies_rw));
+  // B IMPLIES NOT A
+  let implies_rw = if b_vars.is_subset(&a_vars) {
+    create_implies_rewrite_lt(b_pat.clone(), a_pat.clone(), false)
+  } else {
+    create_implies_rewrite_gt(b_pat.clone(), a_pat.clone(), false)
+  };
+  let eq = Equation::new(b_implies_not_a, true_sexp);
+  res.push((eq, implies_rw));
+
+  // for real_rhs_rec in vec![rhs_rec, &rhs_rec_not] {
+  //   let implies_expr = implies_op.join_recexprs(|id| {
+  //     if id == Id::from(0) {
+  //       &lhs_rec
+  //     } else if id == Id::from(1) {
+  //       &real_rhs_rec
+  //     } else {
+  //       &true_expr
+  //     }
+  //   });
+
+  //   let lemma_number = 0; // this is not used
+  //                         // this could be changed in the future for arb interpolation
+  //   let implies_rw = {
+  //     if lhs_vars.is_subset(&rhs_vars) {
+  //       create_implies_rewrite_lt(lhs_pat.clone(), rhs_pat.clone(), real_rhs_rec == rhs_rec)
+  //     } else {
+  //       create_implies_rewrite_gt(lhs_pat.clone(), rhs_pat.clone(), real_rhs_rec == rhs_rec)
+  //     }
+  //   };
+  //   let lemma_rw_opt = self.make_lemma_rewrite_type_only(
+  //     &implies_expr,
+  //     &true_expr,
+  //     lemma_number,
+  //     true,
+  //     Some(implies_rw),
+  //   );
+  //   if let Some(lemma_rw) = lemma_rw_opt {
+  //     println!("adding lemma: {}", lemma_rw.lemma_prop);
+  //     lemmas.push(lemma_rw.lemma_prop);
+  //   }
+  // RIPPLE-VERIFY-CONFIG generalizations
+  // let mut new_params = prop.params.clone();
+  // let mut lhs_vars_str = lhs_vars.iter().map(|x| x.to_string());
+  // let mut rhs_vars_str = lhs_vars.iter().map(|x| x.to_string());
+  // new_params.retain(|(var, _ty)| {
+  //   lhs_vars_str.contains(&var.to_string()) || rhs_vars_str.contains(&var.to_string())
+  // });
+  // new_params.push((var_symb, ty));
+  //       // println!("Generalization candidate LHS: {}", new_lhs);
+  //       // println!("Generalization candidate RHS: {}", new_rhs);
+  //       output.push(Prop::new(Equation::new(new_lhs, new_rhs), new_params));
+  // lemmas.push(Prop::new(
+  //   Equation::from_exprs(lhs_rec, rhs_rec),
+  //   new_params,
+  // ));
+  // or not
+  res
+}
+
+fn find_generalizations_impl_n(
+  lhs: Sexp,
+  rhs: Sexp,
+  lhs_pat: Pattern<SymbolLang>,
+  rhs_pat: Pattern<SymbolLang>,
+  params: Vec<(Symbol, Type)>,
   global_context: &Context,
-  fresh_name: String,
-) -> Vec<Prop> {
-  println!("find generalizations prop");
-  let lhs_nontrivial_subexprs = nontrivial_sexp_subexpressions_containing_vars(&prop.eq.lhs);
-  let rhs_nontrivial_subexprs = nontrivial_sexp_subexpressions_containing_vars(&prop.eq.rhs);
-  let mut output = vec![];
+  fresh_var_starter: usize,
+  n: usize,
+) -> Vec<(Prop, Rewrite<SymbolLang, CycleggAnalysis>)> {
+  println!("find generalizations impl");
+  let lhs_nontrivial_subexprs = nontrivial_sexp_subexpressions_containing_vars(&lhs);
+  let rhs_nontrivial_subexprs = nontrivial_sexp_subexpressions_containing_vars(&rhs);
+  // TODO make this symmetric:
+  // let all_subexprs = lhs_nontrivial_subexprs
+  //   .clone()
+  //   .extend(rhs_nontrivial_subexprs);
+  let mut output: Vec<(Prop, Rewrite<SymbolLang, CycleggAnalysis>)> = vec![];
   // println!("Trying to generalize {} = {}", raw_eq.eq.lhs, raw_eq.eq.rhs);
-  for (rhs_subexpr_str, subexpr) in &rhs_nontrivial_subexprs {
-    let op = match subexpr {
-      Sexp::Empty => unreachable!(),
-      // This shouldn't happen unless we generalize a constant
-      Sexp::String(s) => s,
-      Sexp::List(list) => list.first().unwrap().string().unwrap(),
-    };
-    // HACK: Skip partial applications because they have no type
-    if op == "$" {
-      continue;
+  let mut all_pairs = vec![];
+  all_pairs.push((lhs.clone(), rhs.clone(), vec![]));
+  let mut temp_pairs = vec![];
+  temp_pairs.push((lhs.clone(), rhs.clone(), vec![]));
+  for i in 0..n {
+    let mut next_temp_pairs = vec![];
+    for (lhs_new, rhs_new, var_map) in temp_pairs {
+      println!("looking at {} {}", lhs_new, rhs_new);
+      for (rhs_subexpr_str, subexpr) in &rhs_nontrivial_subexprs {
+        let op = match subexpr {
+          Sexp::Empty => unreachable!(),
+          // This shouldn't happen unless we generalize a constant
+          Sexp::String(s) => s,
+          Sexp::List(list) => list.first().unwrap().string().unwrap(),
+        };
+        // HACK: Skip partial applications because they have no type
+        if op == "$" {
+          continue;
+        }
+        let op_ty = &global_context[&Symbol::new(op)];
+        // Again, we assume that the expression here is fully applied, i.e. it is not a $
+        let (_, ty) = op_ty.args_ret();
+        let fresh_name = format!("fresh_{}", (fresh_var_starter + i));
+        let var_symb = Symbol::new(&fresh_name);
+        let generalized_var = Sexp::String(fresh_name.clone());
+        let rhs_new_gen = substitute_sexp(&rhs_new, subexpr, &generalized_var);
+        if rhs_new_gen == rhs_new {
+          println!("the same ({}); continue", rhs_new_gen);
+          continue;
+        }
+        let mut lhs_new_gen_maybe = None;
+        // if lhs is a constant then we only need to generalize one side
+        // watch out - generalizing 1
+        if sexp_is_constructor(&lhs_new) {
+          println!("is constructor");
+          lhs_new_gen_maybe = Some(lhs_new.clone());
+        }
+        // else we do what CCLemma already does
+        else if lhs_nontrivial_subexprs.get(rhs_subexpr_str).is_some() {
+          // should be the same subexpr so we don't need to bind it
+          println!("is same subexpr");
+          lhs_new_gen_maybe = Some(substitute_sexp(&lhs_new, subexpr, &generalized_var));
+        } else {
+          println!("is none");
+        }
+        if let Some(lhs_new_gen) = lhs_new_gen_maybe {
+          let mut new_map = var_map.clone();
+          new_map.push((var_symb, ty));
+          next_temp_pairs.push((lhs_new_gen, rhs_new_gen, new_map));
+          println!("push into temp pairs new");
+        }
+      }
     }
-    let op_ty = &global_context[&Symbol::new(op)];
-    // Again, we assume that the expression here is fully applied, i.e. it is not a $
-    let (_, ty) = op_ty.args_ret();
-    let var_symb = Symbol::new(&fresh_name);
-    let generalized_var = Sexp::String(fresh_name.clone());
-    let new_rhs = substitute_sexp(&prop.eq.rhs, subexpr, &generalized_var);
-    let mut new_lhs_maybe = None;
-    // if lhs is a constant then we only need to generalize one side
-    // watch out - generalizing 1
-    if sexp_is_constructor(&prop.eq.lhs) {
-      new_lhs_maybe = Some(prop.eq.lhs.clone());
-    }
-    // else we do what CCLemma already does
-    else if lhs_nontrivial_subexprs.get(rhs_subexpr_str).is_some() {
-      // should be the same subexpr so we don't need to bind it
-      new_lhs_maybe = Some(substitute_sexp(&prop.eq.lhs, subexpr, &generalized_var));
-    }
-    if let Some(new_lhs) = new_lhs_maybe {
-      // FIXME: hacky way to find variables
-      let lhs_vars = sexp_leaves(&new_lhs);
-      let rhs_vars = sexp_leaves(&new_rhs);
-      let mut new_params = prop.params.clone();
-      // Only keep the vars that remain after substituting.
-      new_params.retain(|(var, _ty)| {
-        lhs_vars.contains(&var.to_string()) || rhs_vars.contains(&var.to_string())
-      });
-      new_params.push((var_symb, ty));
-      // println!("Generalization candidate LHS: {}", new_lhs);
-      // println!("Generalization candidate RHS: {}", new_rhs);
-      output.push(Prop::new(Equation::new(new_lhs, new_rhs), new_params));
-      // let temp = find_generalizations_prop(
-      //   &Prop::new(Equation::new(new_lhs, new_rhs), new_params),
-      //   global_context,
-      //   fresh_name.clone(),
-      // );
-      // output.extend(temp);
-    }
+    temp_pairs = next_temp_pairs.clone();
+    all_pairs.extend(next_temp_pairs);
   }
   // RIPPLE-VERIFY-TODO: do the generalization for the other side
+  for (new_lhs, new_rhs, var_map) in all_pairs {
+    println!("temp pair: {} {}", new_lhs, new_rhs);
+    // FIXME: hacky way to find variables
+    let lhs_vars = sexp_leaves(&new_lhs);
+    let rhs_vars = sexp_leaves(&new_rhs);
+    let mut new_params = params.clone();
+    // Only keep the vars that remain after substituting.
+    new_params.retain(|(var, _ty)| {
+      lhs_vars.contains(&var.to_string()) || rhs_vars.contains(&var.to_string())
+    });
+    new_params.extend(var_map.clone());
+    // Sexp::List(xs.to_owned())
+    println!("NEW IMPL LHS: {}", new_lhs);
+    println!("NEW IMPL RHS: {}", new_rhs);
+    println!("NEW PARAMS: {:?}", new_params.clone());
+    let new_eqs = create_implies_equations(new_lhs, new_rhs, lhs_pat.clone(), rhs_pat.clone());
+    let new_props = new_eqs
+      .into_iter()
+      .map(|(eq, rw)| (Prop::new(eq, new_params.clone()), rw));
+    output.extend(new_props);
+  }
   output
 }
 
@@ -1053,6 +1200,9 @@ impl<'a> Goal<'a> {
     temp_lemmas.push(&lem1);
     temp_lemmas.push(&lem2);
     temp_lemmas.push(&lem3);
+    println!("SELF LEMMAS: {:?}", self.lemmas.values());
+    println!("TOP LEMMAS: {:?}", top_lemmas.values());
+    println!("TEMP LEMMAS: {:?}", temp_lemmas);
     let rewrites: Vec<_> = self
       .global_search_state
       .reductions
@@ -2203,61 +2353,46 @@ impl<'a> Goal<'a> {
     return false;
   }
 
-  fn construct_implication(
+  fn construct_implication_all_gen(
     &mut self,
-    lhs_rec: RecExpr<SymbolLang>,
-    rhs_rec: RecExpr<SymbolLang>,
-  ) -> Vec<Prop> {
-    let not_op = SymbolLang::new(format!("{}", *NOT), vec![Id::from(0)]);
-    let rhs_rec_not = not_op.join_recexprs(|id| rhs_rec);
-    println!("maybe: {}=?=>{}", lhs_rec, rhs_rec);
-    println!("maybe: {}=?=>{}", lhs_rec, rhs_rec_not);
-    let ite_str = format!("{}{}", *ITE, 0);
-    let true_expr = RecExpr::from_str(&TRUE).unwrap();
-    let implies_op = SymbolLang::new(ite_str, vec![Id::from(0), Id::from(1), Id::from(2)]);
-    let lemmas = vec![];
-    for res_expr in vec![rhs_rec, rhs_rec_not] {
-      let implies_expr = implies_op.join_recexprs(|id| {
-        if id == Id::from(0) {
-          &lhs_rec
-        } else if id == Id::from(1) {
-          &res_expr
-        } else {
-          &true_expr
-        }
-      });
-
-      let lemma_number = 0; // this is not used
-                            // this could be changed in the future for arb interpolation
-      let implies_rw = {
-        if lhs_vars.is_subset(&rhs_vars) {
-          create_implies_rewrite_lt(lhs_pat.clone(), rhs_pat.clone(), res_expr == bool_expr)
-        } else {
-          create_implies_rewrite_gt(lhs_pat.clone(), rhs_pat.clone(), res_expr == bool_expr)
-        }
-      };
-      let lemma_rw_opt = self.make_lemma_rewrite_type_only(
-        &implies_expr,
-        &true_expr,
-        lemma_number,
-        true,
-        Some(implies_rw),
-      );
-      if let Some(lemma_rw) = lemma_rw_opt {
-        println!("adding lemma: {}", lemma_rw.lemma_prop);
-        // RIPPLE-VERIFY-CONFIG generalizations
-        lemmas.extend(find_generalizations_impl_n(
-          &lemma_rw.lemma_prop,
-          self.global_search_state.context,
-          self.name.clone(),
-          2,
-        ));
-        // or not
-        // lemmas.push(lemma_rw.lemma_prop);
-      }
+    prop: &Prop,
+    lhs_rec: &RecExpr<SymbolLang>,
+    rhs_rec: &RecExpr<SymbolLang>,
+  ) -> Vec<(Prop, Rewrite<SymbolLang, CycleggAnalysis>)> {
+    let mut lemmas: Vec<_> = vec![];
+    let is_var = |v: &Symbol| self.local_context.contains_key(&v.clone());
+    let lhs_pat = to_pattern(&lhs_rec, is_var);
+    let rhs_pat = to_pattern(&rhs_rec, is_var);
+    let lhs_vars = var_set(&lhs_pat);
+    let rhs_vars = var_set(&rhs_pat);
+    // TODO make this more efficient so we do intersection O(n) instead of O(n^2) times
+    println!("computing intersection");
+    println!("{}", lhs_rec);
+    println!("{}", rhs_rec);
+    let var_sets_good: bool = lhs_vars
+      .intersection(&rhs_vars)
+      .collect::<Vec<&Var>>()
+      .len()
+      >= 1
+      && (lhs_vars.is_subset(&rhs_vars) || rhs_vars.is_subset(&lhs_vars));
+    // this could be changed in the future to support arbitrary interpolations
+    if var_sets_good {
+      let mut params = prop.params.clone();
+      params.extend(self.local_context.clone());
+      lemmas.extend(find_generalizations_impl_n(
+        symbolic_expressions::parser::parse_str(&lhs_rec.to_string()).unwrap(),
+        symbolic_expressions::parser::parse_str(&rhs_rec.to_string()).unwrap(),
+        lhs_pat,
+        rhs_pat,
+        params,
+        self.global_search_state.context,
+        self.egraph.total_size(),
+        3,
+      ));
     }
     lemmas
   }
+
   fn check_if_ripple_rule(&mut self, lhs_id: Id, rhs_id: Id) -> bool {
     let is_var = |v: &str| {
       self
@@ -2267,21 +2402,49 @@ impl<'a> Goal<'a> {
     let extractor = egg::Extractor::new(&self.egraph, AstSize);
     let lhs_expr = extractor.find_best(lhs_id).1;
     let rhs_expr = extractor.find_best(rhs_id).1;
-    let lhs_vars = get_vars(&lhs_expr, is_var);
-    let rhs_vars = get_vars(&rhs_expr, is_var);
-    for v in lhs_vars.intersection(&rhs_vars) {
-      // let lhs_traces = get_traces();
-      // let rhs_traces = get_traces();
-    }
+    // let lhs_vars = get_vars(&lhs_expr, is_var);
+    // let rhs_vars = get_vars(&rhs_expr, is_var);
+    // for v in lhs_vars.intersection(&rhs_vars) {
+    // let lhs_traces = get_traces();
+    // let rhs_traces = get_traces();
+    // }
     false
+  }
+
+  fn is_bool(&mut self, id: &&Id) -> bool {
+    let class_op = self.egraph[**id].data.canonical_form_data.get_enode().op;
+    if class_op == "$".into() {
+      false
+    } else {
+      // RIPPLE-VERIFY-TODO: debug when this fails
+      let res = self
+        .global_search_state
+        .context
+        .get(&class_op)
+        .or_else(|| self.local_context.get(&class_op));
+      if let Some(r) = res {
+        let (args_ty, class_ty) = r.args_ret();
+        !(args_ty.iter().all(|x| x.to_string() == *BOOL_TYPE)) && class_ty.to_string() == *BOOL_TYPE
+      } else {
+        false
+      }
+    }
+  }
+
+  fn is_interesting(&mut self, expr: RecExpr<SymbolLang>) -> bool {
+    let op2 = expr.as_ref().last().unwrap();
+    (op2.op.as_str() != *AND && op2.op.as_str() != *OR)
+      && !self.is_reducible(&expr)
+      && expr.as_ref().len() > 1
   }
 
   // TODO RUN THIS AT THE RIGHT TIME - BEFORE ANY BOOL CONDITIONAL CASE SPLITS
   fn search_for_implies_lemmas(
     &mut self,
+    prop: &Prop,
     timer: &Timer,
     lemmas_state: &mut LemmasState,
-  ) -> Vec<Prop> {
+  ) -> Vec<(Prop, Rewrite<SymbolLang, CycleggAnalysis>)> {
     println!("search for implies lemmas");
     // RIPPLE-VERIFY-CONFIG {
     let ADD_PREMISE_IMPLICATIONS = true;
@@ -2295,83 +2458,53 @@ impl<'a> Goal<'a> {
       print_expressions_in_eclass(&self.egraph, resolved_lhs_id);
       println!("rhs: ");
       print_expressions_in_eclass(&self.egraph, resolved_rhs_id);
-      // print_all_expressions_in_egraph(&self.egraph, 7);
     }
-    let is_bool = |id: &&Id| {
-      let class_op = self.egraph[**id].data.canonical_form_data.get_enode().op;
-      if class_op == "$".into() {
-        false
-      } else {
-        // RIPPLE-VERIFY-TODO: debug when this fails
-        let res = self
-          .global_search_state
-          .context
-          .get(&class_op)
-          .or_else(|| self.local_context.get(&class_op));
-        if let Some(r) = res {
-          let (args_ty, class_ty) = r.args_ret();
-          !(args_ty.iter().all(|x| x.to_string() == *BOOL_TYPE))
-            && class_ty.to_string() == *BOOL_TYPE
-        } else {
-          false
-        }
-      }
-    };
-    let is_interesting = |expr: RecExpr<SymbolLang>| {
-      let op2 = expr.as_ref().last().unwrap();
-      op2.op.as_str() == *AND || op2.op.as_str() == *OR
-    };
     if ADD_PREMISE_IMPLICATIONS {
       let class_ids: Vec<Id> = self.egraph.classes().map(|c| c.id).collect();
-      let true_id = self.egraph.add(SymbolLang::leaf(TRUE.clone()));
-      let false_id = self.egraph.add(SymbolLang::leaf(FALSE.clone()));
+      let _true_id = self.egraph.add(SymbolLang::leaf(TRUE.clone()));
+      let _false_id = self.egraph.add(SymbolLang::leaf(FALSE.clone()));
       self.egraph.rebuild();
       let bool_expr_ids: Vec<Id> = class_ids
         .iter()
-        .filter(|id| is_bool(id))
-        .map(|id| self.egraph.find(*id))
+        .filter_map(|id| {
+          if self.is_bool(&id) {
+            Some(self.egraph.find(*id))
+          } else {
+            None
+          }
+        })
         .collect();
-      let is_var = |v: &Symbol| self.local_context.contains_key(&v.clone());
-      let exprs_lhs = get_all_expressions_with_loop(&self.egraph, bool_expr_ids.clone())
+      let exprs_lhs_temp = get_all_expressions_with_loop(&self.egraph, bool_expr_ids);
+      let exprs_lhs: Vec<(&Id, Vec<&RecExpr<SymbolLang>>)> = exprs_lhs_temp
         .iter()
-        .map(|(id, vec)| (id, vec.iter().filter(|expr| is_interesting(**expr))));
+        .map(|(id, vec)| {
+          (
+            id,
+            (*vec)
+              .iter()
+              .filter(|expr| self.is_interesting((*expr).clone()))
+              .collect(),
+          )
+        })
+        .collect();
       let exprs_rhs = exprs_lhs.clone();
       for (lhs_id, lhs_reclist) in exprs_lhs {
         for (rhs_id, rhs_reclist) in exprs_rhs.clone() {
+          // we do both sides of implication later - better because we can do generalization step once for all combos
+          // TODO ^
           if lhs_id == rhs_id {
             continue;
           }
-          for lhs_rec in lhs_reclist {
+          for lhs_rec in lhs_reclist.clone() {
             for rhs_rec in rhs_reclist.clone() {
-              let lhs_pat = to_pattern(&lhs_rec, is_var);
-              let rhs_pat = to_pattern(&rhs_rec, is_var);
-              let lhs_vars = var_set(&lhs_pat);
-              let rhs_vars = var_set(&rhs_pat);
-              // make this more efficient so we do intersection O(n) instead of O(n^2) times
-              println!("computing intersection");
-              println!("{}", lhs_rec);
-              println!("{}", rhs_rec);
-              let var_sets_good: bool = lhs_vars
-                .intersection(&rhs_vars)
-                .collect::<Vec<&Var>>()
-                .len()
-                >= 1
-                && (lhs_vars.is_subset(&rhs_vars) || rhs_vars.is_subset(&lhs_vars));
-              // this could be changed in the future to support arbitrary interpolations
-              if var_sets_good
-                && !self.is_reducible(lhs_rec)
-                && !self.is_reducible(rhs_rec)
-                && *lhs_rec != *rhs_rec
-                && lhs_rec.as_ref().len() > 1
-              {
-                self.construct_implication(lhs_rec, rhs_rec);
+              if *lhs_rec != *rhs_rec {
+                println!("construct implication: {} ?? {}", lhs_rec, rhs_rec);
+                lemmas.extend(self.construct_implication_all_gen(prop, lhs_rec, rhs_rec));
               }
-              // }
             }
           }
         }
       }
-      // }
     }
     lemmas
   }
@@ -3089,6 +3222,26 @@ impl LemmasState {
     }
     new_lemmas
   }
+
+  pub fn add_lemmas_with_rw<
+    I: IntoIterator<Item = (Prop, Rewrite<SymbolLang, CycleggAnalysis>)>,
+  >(
+    &mut self,
+    iter: I,
+    proof_depth: usize,
+  ) -> (Vec<(usize, Rw)>, Vec<(usize, Prop)>) {
+    let mut new_lemmas = Vec::new();
+    let mut new_implies_rws = Vec::new();
+    for lemma in iter.into_iter() {
+      if self.is_valid_new_prop(&lemma.0) {
+        let backup = lemma.0.clone();
+        let n = self.find_or_make_fresh_lemma(lemma.0, proof_depth);
+        new_lemmas.push((n, backup));
+        new_implies_rws.push((n, lemma.1));
+      }
+    }
+    (new_implies_rws, new_lemmas)
+  }
 }
 
 #[derive(Default)]
@@ -3148,6 +3301,7 @@ impl<'a> LemmaProofState<'a> {
   pub fn new(
     lemma_number: usize,
     prop: Prop,
+    implies_rw: Option<Rw>,
     premise: &Option<Equation>,
     global_search_state: GlobalSearchState<'a>,
     proof_depth: usize,
@@ -3159,7 +3313,7 @@ impl<'a> LemmaProofState<'a> {
       &goal.eq.rhs.expr,
       lemma_number,
       false,
-      None,
+      implies_rw,
     );
     let lemma_rw_opt_no_analysis =
       goal.make_lemma_rewrite_unchecked(&goal.eq.lhs.expr, &goal.eq.rhs.expr, lemma_number, false);
@@ -3252,7 +3406,7 @@ impl<'a> LemmaProofState<'a> {
     info: &GoalInfo,
     timer: &Timer,
     lemmas_state: &mut LemmasState,
-  ) -> Option<(Vec<(usize, Prop)>, Vec<GoalInfo>)> {
+  ) -> Option<(Vec<(usize, Prop)>, Vec<(usize, Rw)>, Vec<GoalInfo>)> {
     let pos = self.get_info_index(info);
     let goal = self.goals.get_mut(pos).unwrap();
 
@@ -3317,6 +3471,7 @@ impl<'a> LemmaProofState<'a> {
 
     // println!("searching for generalized lemmas");
     let mut related_lemmas = Vec::new();
+    let mut rw_indices_all = Vec::new();
     if CONFIG.generalization {
       println!("GENERALIZATION");
       let lemma_indices = lemmas_state.add_lemmas(
@@ -3374,9 +3529,11 @@ impl<'a> LemmaProofState<'a> {
             goals_mod = goals_mod_new;
           }
           for mut g in goals_mod {
-            let possible_lemmas = g.search_for_implies_lemmas(timer, lemmas_state);
-            let lemma_indices = lemmas_state.add_lemmas(possible_lemmas, self.proof_depth + 1);
+            let possible_lemmas = g.search_for_implies_lemmas(&self.prop, timer, lemmas_state);
+            let (rw_indices, lemma_indices) =
+              lemmas_state.add_lemmas_with_rw(possible_lemmas, self.proof_depth + 1);
             related_lemmas.extend(lemma_indices);
+            rw_indices_all.extend(rw_indices);
           }
         }
       }
@@ -3392,22 +3549,6 @@ impl<'a> LemmaProofState<'a> {
     let b_len = blocking_vars.len();
     println!("blocking vars: {:?}", blocking_vars.clone());
     if let Some(scrutinee) = goal.next_scrutinee(blocking_vars) {
-      // // TODO fix abhorrent heuristic
-      // let mut should_case_split = false;
-      // if !goal.is_implication_with_and() {
-      //   println!("1");
-      //   should_case_split = true;
-      // };
-      // if scrutinee.name.to_string().starts_with("g_") {
-      //   println!("2");
-      //   should_case_split = true;
-      // }
-      // if goal.local_context.get(&scrutinee.name).unwrap().to_string() != BOOL_TYPE.clone() {
-      //   println!("3");
-      //   should_case_split = true;
-      // }
-      // println!("case split: {}", should_case_split);
-      // if should_case_split {
       println!("CASE SPLIT on {}", scrutinee.name);
       if CONFIG.verbose {
         println!(
@@ -3429,7 +3570,7 @@ impl<'a> LemmaProofState<'a> {
         .map(|new_goal| GoalInfo::new(new_goal, info.lemma_id))
         .collect();
       self.goals.extend(goals);
-      return Some((related_lemmas, goal_infos));
+      return Some((related_lemmas, rw_indices_all, goal_infos));
       // } else {
       //   println!("manual refuse to case split");
       //   return Some((related_lemmas, vec![]));
@@ -3610,6 +3751,7 @@ struct GoalLevelPriorityQueue {
   goal_graph: GoalGraph,
   next_goal: Option<GoalInfo>,
   prop_map: HashMap<usize, Prop>,
+  implies_rule_map: HashMap<usize, Rewrite<SymbolLang, CycleggAnalysis>>,
   progress_set: HashSet<usize>,
   is_found_new_lemma: bool,
 }
@@ -3619,6 +3761,7 @@ impl GoalLevelPriorityQueue {
     &mut self,
     info: &GoalInfo,
     lemmas: Vec<(usize, Prop)>,
+    implies_rws: Vec<(usize, Rewrite<SymbolLang, CycleggAnalysis>)>,
     proof_state: &mut ProofState<'_>,
   ) {
     if lemmas.is_empty() {
@@ -3626,6 +3769,12 @@ impl GoalLevelPriorityQueue {
     }
     let mut related_lemma_root = Vec::new();
     //println!("found lemmas for {}", info.full_exp);
+    for (index, implies_rw) in implies_rws {
+      self
+        .implies_rule_map
+        .entry(index)
+        .or_insert(implies_rw.clone());
+    }
     for (index, prop) in lemmas {
       //println!("  {}", prop);
       if proof_state.timer.timeout() {
@@ -3658,10 +3807,11 @@ impl GoalLevelPriorityQueue {
     &mut self,
     info: &GoalInfo,
     related_lemmas: Vec<(usize, Prop)>,
+    implies_rws: Vec<(usize, Rewrite<SymbolLang, CycleggAnalysis>)>,
     related_goals: Vec<GoalInfo>,
     proof_state: &mut ProofState<'_>,
   ) {
-    self.add_lemmas_for(info, related_lemmas, proof_state);
+    self.add_lemmas_for(info, related_lemmas, implies_rws, proof_state);
     self.goal_graph.record_case_split(info, &related_goals);
   }
 
@@ -3701,8 +3851,8 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     // if CONFIG.verbose {
     let _goals = self.goal_graph.get_lemma(0).goals.clone();
     println!("\n\n================= current queue ==============");
-    // LIMIT TO 5
-    for info in frontier.iter().take(5) {
+    // LIMIT TO 10
+    for info in frontier.iter().take(10) {
       println!("[{}] {}", info.size, info.full_exp);
       println!("  ({}) {}", info.lemma_id, self.prop_map[&info.lemma_id]);
     }
@@ -3741,9 +3891,15 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
       proof_state.lemma_proofs.entry(lemma_index)
     {
       let prop = self.prop_map.get(&lemma_index).unwrap().clone();
+      let implies_rw = if let Some(x) = self.implies_rule_map.get(&lemma_index) {
+        Some(x.clone())
+      } else {
+        None
+      };
       e.insert(LemmaProofState::new(
         lemma_index,
         prop,
+        implies_rw,
         &None,
         proof_state.global_search_state,
         0,
@@ -3783,7 +3939,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     let step_res =
       lemma_proof_state.try_goal(&info, &proof_state.timer, &mut proof_state.lemmas_state);
 
-    if let Some((raw_related_lemmas, related_goals)) = step_res {
+    if let Some((raw_related_lemmas, raw_implies_rws, related_goals)) = step_res {
       let mut related_lemmas = raw_related_lemmas;
       if CONFIG.exclude_bid_reachable {
         let _pre_size = related_lemmas.len();
@@ -3811,7 +3967,13 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
           );
         }
       }
-      self.insert_waiting(&info, related_lemmas, related_goals, proof_state);
+      self.insert_waiting(
+        &info,
+        related_lemmas,
+        raw_implies_rws,
+        related_goals,
+        proof_state,
+      );
       // let impl_lemmas = related_lemmas.iter().filter(|lem| lem.1.eq.impl)
       // for lem in related_lemmas {
       //   for g in related_goals {
@@ -3971,354 +4133,6 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
   }
 }
 
-#[derive(Default)]
-struct RandomizedGoalLevelPriorityQueue {
-  goal_graph: GoalGraph,
-  next_goal: Option<GoalInfo>,
-  prop_map: HashMap<usize, Prop>,
-  progress_set: HashSet<usize>,
-  is_found_new_lemma: bool,
-}
-
-impl RandomizedGoalLevelPriorityQueue {
-  fn add_lemmas_for(
-    &mut self,
-    info: &GoalInfo,
-    lemmas: Vec<(usize, Prop)>,
-    proof_state: &mut ProofState<'_>,
-  ) {
-    if lemmas.is_empty() {
-      return;
-    }
-    let mut related_lemma_root = Vec::new();
-    //println!("found lemmas for {}", info.full_exp);
-    for (index, prop) in lemmas {
-      //println!("  {}", prop);
-      if proof_state.timer.timeout() {
-        return;
-      }
-
-      /*let lemma_state = proof_state.lemma_proofs.entry(index).or_insert_with(|| {
-        LemmaProofState::new(index, prop, &None, proof_state.global_search_state, 0)
-      });
-      if lemma_state.outcome.is_some() {
-        assert_eq!(lemma_state.outcome, Some(Outcome::Invalid));
-        continue;
-      }
-      related_lemma_root.push(GoalInfo::new(&lemma_state.goals[0], index))*/
-      self.prop_map.entry(index).or_insert(prop.clone());
-      let start_info = GoalInfo {
-        name: get_lemma_name(index),
-        lemma_id: index,
-        full_exp: prop.eq.to_string(),
-        size: prop.size(),
-      };
-      related_lemma_root.push((start_info, prop));
-    }
-    self
-      .goal_graph
-      .record_related_lemmas(info, &related_lemma_root);
-  }
-
-  fn insert_waiting(
-    &mut self,
-    info: &GoalInfo,
-    related_lemmas: Vec<(usize, Prop)>,
-    related_goals: Vec<GoalInfo>,
-    proof_state: &mut ProofState<'_>,
-  ) {
-    self.add_lemmas_for(info, related_lemmas, proof_state);
-    self.goal_graph.record_case_split(info, &related_goals);
-  }
-
-  fn update_subsumed_lemmas(&mut self, proof_state: &mut ProofState<'_>) {
-    let active_lemmas = self.goal_graph.send_subsumed_check();
-    let subsumed_lemmas = active_lemmas
-      .into_iter()
-      .filter({
-        |lemma| {
-          !proof_state
-            .lemmas_state
-            .is_valid_new_prop(&self.prop_map[lemma])
-        }
-      })
-      .collect();
-    self.goal_graph.receive_subsumed_check(subsumed_lemmas);
-  }
-}
-
-impl BreadthFirstScheduler for RandomizedGoalLevelPriorityQueue {
-  /// This is just the lemma number
-  type LemmaIndex = usize;
-
-  fn next_lemma_batch(
-    &mut self,
-    _top_level_lemma_number: usize,
-    proof_state: &mut ProofState<'_>,
-  ) -> Result<Vec<Self::LemmaIndex>, Outcome> {
-    // No more lemmas to try and prove
-    if self.is_found_new_lemma {
-      self.update_subsumed_lemmas(proof_state);
-    }
-    self.is_found_new_lemma = true;
-    let mut frontier = self.goal_graph.get_frontier_goals();
-    if CONFIG.verbose {
-      let _goals = self.goal_graph.get_lemma(0).goals.clone();
-      println!("\n\n================= current queue ==============");
-      for info in frontier.iter() {
-        println!("[{}] {}", info.size, info.full_exp);
-        println!("  ({}) {}", info.lemma_id, self.prop_map[&info.lemma_id]);
-      }
-      println!("\n\n");
-    }
-    if frontier
-      .iter()
-      .any(|info| self.progress_set.contains(&info.lemma_id))
-    {
-      frontier.retain(|info| self.progress_set.contains(&info.lemma_id));
-    }
-    // RIPPLE-VERIFY:
-    // preserve ordering because it is priority-ordered
-    // min_by_key is stable so it not only gets the smallest element but also preserves the ordering
-    // we have to do the same thing but introduce randomness
-    // todo use proper distributions
-    // RIPPLE-VERIFY-CONFIG {
-    let TEMPERATURE_1 = 0.2; // randomize the size of lemma chosen
-    let TEMPERATURE_2 = 0.1; // randomize the position in dfs of lemma chosen
-                             // } RIPPLE-VERIFY-CONFIG
-    let mut rng = rand::thread_rng();
-    let frontier_size = frontier.len();
-    if let Some(mut optimal) = frontier.iter().min_by_key(|info| info.size) {
-      let min_size_mod = optimal.size
-        + (0..10)
-          .collect::<Vec<usize>>()
-          .choose_weighted(&mut rng, |x| f64::powf(TEMPERATURE_1, *x as f64))
-          .unwrap();
-      let lemmas_with_min_size = frontier.iter().filter(|x| x.size <= min_size_mod);
-      optimal = lemmas_with_min_size
-        .enumerate()
-        .collect::<Vec<(usize, &GoalInfo)>>()
-        .choose_weighted(&mut rng, |x| f64::powf(TEMPERATURE_2, x.0 as f64))
-        .unwrap()
-        .1;
-      self.next_goal = Some(optimal.clone());
-      if self.progress_set.contains(&optimal.lemma_id) {
-        self.progress_set.remove(&optimal.lemma_id);
-      }
-      Ok(vec![optimal.lemma_id])
-    } else {
-      println!("report unknown because of an empty queue");
-      Err(Outcome::Unknown)
-    }
-  }
-
-  fn get_lemma_number(&self, lemma_index: &Self::LemmaIndex) -> usize {
-    *lemma_index
-  }
-
-  fn handle_lemma(&mut self, lemma_index: Self::LemmaIndex, proof_state: &mut ProofState<'_>) {
-    assert!(self.next_goal.is_some());
-    let info = self.next_goal.clone().unwrap();
-    assert_eq!(info.lemma_id, lemma_index);
-
-    if let std::collections::btree_map::Entry::Vacant(e) =
-      proof_state.lemma_proofs.entry(lemma_index)
-    {
-      let prop = self.prop_map.get(&lemma_index).unwrap().clone();
-      e.insert(LemmaProofState::new(
-        lemma_index,
-        prop,
-        &None,
-        proof_state.global_search_state,
-        0,
-      ));
-    }
-
-    if CONFIG.verbose {
-      println!(
-        "\ntry goal {} from {}",
-        info.full_exp, self.prop_map[&info.lemma_id]
-      );
-    }
-    let lemma_state = proof_state.lemma_proofs.get_mut(&lemma_index).unwrap();
-    if lemma_state.outcome.is_some() {
-      assert_eq!(lemma_state.outcome, Some(Outcome::Invalid));
-      self
-        .goal_graph
-        .set_lemma_res(info.lemma_id, GraphProveStatus::Invalid);
-      return;
-    }
-
-    let lemma_proof_state = proof_state.lemma_proofs.get_mut(&lemma_index).unwrap();
-    // println!("\ntry goal {} from {} {}", info.full_exp, self.prop_map[&info.lemma_id], lemma_proof_state.case_split_depth);
-
-    // RIPPLE-VERIFY-CONFIG {
-    let PRINT_LEMMA_ATTEMPTS = true;
-    // } RIPPLE-VERIFY-CONFIG
-    if PRINT_LEMMA_ATTEMPTS {
-      println!(
-        "? attempting lemma {} {}",
-        lemma_proof_state.prop, info.full_exp
-      );
-    }
-
-    let step_res =
-      lemma_proof_state.try_goal(&info, &proof_state.timer, &mut proof_state.lemmas_state);
-
-    if let Some((raw_related_lemmas, related_goals)) = step_res {
-      let mut related_lemmas = raw_related_lemmas;
-      if CONFIG.exclude_bid_reachable {
-        let _pre_size = related_lemmas.len();
-        related_lemmas = self
-          .goal_graph
-          .exclude_bid_reachable_lemmas(&related_lemmas);
-        /*if pre_size > related_lemmas.len() {
-          println!("Reduce from {} to {}", pre_size, related_lemmas.len());
-        }*/
-      }
-
-      // if CONFIG.verbose {
-      println!("\nFrom {}", info.full_exp);
-      println!("(Lemma) {}", self.prop_map[&info.lemma_id]);
-      println!(
-        "  lemmas: {}, goals: {}",
-        related_lemmas.len(),
-        related_goals.len()
-      );
-      for lemma in related_lemmas.iter() {
-        println!(
-          "  ({}) {}",
-          sexp_size(&lemma.1.eq.lhs) + sexp_size(&lemma.1.eq.rhs),
-          lemma.1
-        );
-      }
-      // }
-      self.insert_waiting(&info, related_lemmas, related_goals, proof_state);
-    } else {
-      if lemma_proof_state.outcome.is_none() {
-        self
-          .goal_graph
-          .record_node_status(&info, GraphProveStatus::Valid);
-        self.progress_set.insert(info.lemma_id);
-      } else if lemma_proof_state.outcome == Some(Outcome::Invalid) {
-        self
-          .goal_graph
-          .record_node_status(&info, GraphProveStatus::Invalid);
-        let state = proof_state.lemma_proofs.get_mut(&info.lemma_id).unwrap();
-        println!("- proved invalidity {} {}", state.prop, info.full_exp);
-      }
-      if self.goal_graph.is_lemma_proved(info.lemma_id)
-        && (!CONFIG.reduce_proven_lemma || !self.goal_graph.is_root(&info) || info.lemma_id == 0)
-      {
-        let state = proof_state.lemma_proofs.get_mut(&info.lemma_id).unwrap();
-        state.outcome = Some(Outcome::Valid);
-        println!("+ proved lemma {} {}", state.prop, info.full_exp);
-
-        if CONFIG.exclude_bid_reachable {
-          state.rw_no_analysis.clone().map(|rw| {
-            if rw.lhs_to_rhs.is_some() && rw.rhs_to_lhs.is_some() {
-              self
-                .goal_graph
-                .add_bid_rewrites(rw.lhs_to_rhs.unwrap().1, rw.rhs_to_lhs.unwrap().1);
-            }
-          });
-        }
-      }
-      if let Some(outcome) = proof_state
-        .lemma_proofs
-        .get(&info.lemma_id)
-        .unwrap()
-        .outcome
-        .clone()
-      {
-        self.is_found_new_lemma = true;
-        if outcome == Outcome::Valid {
-          self
-            .goal_graph
-            .set_lemma_res(info.lemma_id, GraphProveStatus::Valid);
-        } else if outcome == Outcome::Invalid {
-          self
-            .goal_graph
-            .set_lemma_res(info.lemma_id, GraphProveStatus::Invalid);
-        } else {
-          panic!();
-        }
-      }
-    }
-  }
-
-  fn on_proven_lemma(&mut self, _lemma: usize, proof_state: &mut ProofState<'_>) {
-    let mut new_lemma = HashSet::new();
-    new_lemma.insert(_lemma);
-
-    while !new_lemma.is_empty() {
-      // update those subsumed lemmas
-      self.update_subsumed_lemmas(proof_state);
-
-      let proved_goals: Vec<_> = self
-        .goal_graph
-        .get_waiting_goals(Some(&new_lemma))
-        .into_iter()
-        .filter(|info| {
-          let state = proof_state.lemma_proofs.get_mut(&info.lemma_id).unwrap();
-          state.try_finish(info, &mut proof_state.lemmas_state)
-        })
-        .collect();
-
-      new_lemma.clear();
-
-      let mut directly_improved_lemmas = HashSet::new();
-      if CONFIG.reduce_proven_lemma {
-        for goal in proved_goals.iter() {
-          if self.goal_graph.is_root(goal) && goal.lemma_id != 0 {
-            directly_improved_lemmas.insert(goal.lemma_id);
-          }
-        }
-      }
-
-      for goal in proved_goals.into_iter() {
-        // println!("  retry and prove ({}) {}", goal.lemma_id, goal.full_exp);
-        self
-          .goal_graph
-          .record_node_status(&goal, GraphProveStatus::Valid);
-        self.progress_set.insert(goal.lemma_id);
-        if self.goal_graph.is_lemma_proved(goal.lemma_id)
-          && !directly_improved_lemmas.contains(&goal.lemma_id)
-        {
-          let lemma_state = proof_state.lemma_proofs.get_mut(&goal.lemma_id).unwrap();
-          if lemma_state.outcome.is_some() {
-            continue;
-          }
-          lemma_state.outcome = Some(Outcome::Valid);
-          self
-            .goal_graph
-            .set_lemma_res(goal.lemma_id, GraphProveStatus::Valid);
-
-          println!("+ proved lemma {}", lemma_state.prop);
-          new_lemma.insert(goal.lemma_id);
-
-          if CONFIG.exclude_bid_reachable {
-            lemma_state.rw_no_analysis.clone().map(|rw| {
-              if rw.lhs_to_rhs.is_some() && rw.rhs_to_lhs.is_some() {
-                self
-                  .goal_graph
-                  .add_bid_rewrites(rw.lhs_to_rhs.unwrap().1, rw.rhs_to_lhs.unwrap().1);
-              }
-            });
-          }
-
-          ProofState::handle_lemma_outcome(&mut proof_state.lemmas_state, lemma_state);
-          if goal.lemma_id == 0 {
-            return;
-          }
-        }
-      }
-    }
-
-    // self.re_extract_lemmas(proof_state);
-  }
-}
-
 /// Pretty-printed proof state
 pub fn pretty_state(state: &LemmaProofState) -> String {
   format!(
@@ -4439,6 +4253,7 @@ pub fn prove_top(
   let top_goal_lemma_proof = LemmaProofState::new(
     top_goal_lemma_number,
     goal_prop,
+    None,
     &goal_premise,
     global_search_state,
     0,
