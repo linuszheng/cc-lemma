@@ -547,7 +547,7 @@ fn find_generalizations_impl_n(
         let op_ty = &global_context[&Symbol::new(op)];
         // Again, we assume that the expression here is fully applied, i.e. it is not a $
         let (_, ty) = op_ty.args_ret();
-        let fresh_name = format!("fresh_{}", (fresh_var_starter + i));
+        let fresh_name = format!("fresh_{}_{}", (fresh_var_starter), i);
         let var_symb = Symbol::new(&fresh_name);
         let generalized_var = Sexp::String(fresh_name.clone());
         let rhs_new_gen = substitute_sexp(&rhs_new, subexpr, &generalized_var);
@@ -1210,11 +1210,27 @@ impl<'a> Goal<'a> {
       )
       .unwrap()
     };
+    let lem5 = {
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a)", *NOT).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("({} ?b)", *NOT).parse().unwrap();
+      let rhs1: Pattern<SymbolLang> = format!("?a").parse().unwrap();
+      let rhs2: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      Rewrite::new(
+        format!("special5"),
+        DualSearcher {
+          searcher1: lhs1,
+          searcher2: lhs2,
+        },
+        DualApplier::new(rhs1, rhs2),
+      )
+      .unwrap()
+    };
 
     temp_lemmas.push(&lem1);
     temp_lemmas.push(&lem2);
     temp_lemmas.push(&lem3);
     temp_lemmas.push(&lem4);
+    temp_lemmas.push(&lem5);
     println!("SELF LEMMAS: {:?}", self.lemmas.values());
     println!("TOP LEMMAS: {:?}", top_lemmas.values());
     println!("TEMP LEMMAS: {:?}", temp_lemmas);

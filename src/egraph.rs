@@ -318,6 +318,68 @@ where
   }
 }
 
+/// dual searcher
+/// does searcher1 on entire egraph, then does searcher2 on all matches
+/// warning make sure the var sets are disjoint
+pub struct DualSearcher<S> {
+  pub searcher1: S,
+  pub searcher2: S,
+}
+
+impl<S, N, L> Searcher<L, N> for DualSearcher<S>
+where
+  S: Searcher<L, N>,
+  L: Language,
+  N: Analysis<L>,
+{
+  fn search_eclass_with_limit(
+    &self,
+    egraph: &EGraph<L, N>,
+    eclass: Id,
+    limit: usize,
+  ) -> Option<SearchMatches<L>> {
+    // Use the underlying searcher first
+    let matches1 = self
+      .searcher1
+      .search_eclass_with_limit(egraph, eclass, limit)?;
+
+    if matches1.substs.is_empty() {
+      // If all substitutions were filtered out,
+      // it's as if this eclass hasn't matched at all
+      None
+    } else {
+      let matches2 = self
+        .searcher2
+        .search_eclass_with_limit(egraph, eclass, limit)?;
+      if matches2.substs.is_empty() {
+        None
+      } else {
+        let mut substs_new: Vec<Subst> = vec![];
+        for subst1 in matches1.substs.clone() {
+          for subst2 in matches2.substs.clone() {
+            let mut new_subst_elem = subst1.clone();
+            for v in self.searcher2.vars() {
+              new_subst_elem.insert(v, subst2.get(v).unwrap().clone());
+            }
+            substs_new.push(new_subst_elem);
+          }
+        }
+        Some(SearchMatches {
+          eclass: eclass,
+          substs: substs_new,
+          ast: None,
+        })
+      }
+    }
+  }
+
+  fn vars(&self) -> Vec<Var> {
+    let mut x = self.searcher1.vars();
+    x.extend(self.searcher2.vars());
+    x
+  }
+}
+
 /// When we apply the subst to pattern, does it exist in the e-graph?
 pub fn lookup_pattern<L, N>(pattern: &Pattern<L>, egraph: &EGraph<L, N>, subst: &Subst) -> bool
 where
@@ -486,6 +548,49 @@ where
 
   fn vars(&self) -> Vec<Var> {
     egg::Applier::<SymbolLang, N>::vars(&self.applier)
+  }
+}
+
+pub struct DualApplier {
+  applier1: Pattern<SymbolLang>,
+  applier2: Pattern<SymbolLang>,
+}
+
+impl DualApplier {
+  pub fn new(applier1: Pattern<SymbolLang>, applier2: Pattern<SymbolLang>) -> Self {
+    Self { applier1, applier2 }
+  }
+}
+
+impl<N> Applier<SymbolLang, N> for DualApplier
+where
+  N: Analysis<SymbolLang>,
+{
+  fn apply_one(
+    &self,
+    egraph: &mut egg::EGraph<SymbolLang, N>,
+    eclass: Id,
+    subst: &Subst,
+    searcher_ast: Option<&PatternAst<SymbolLang>>,
+    rule_name: Symbol,
+  ) -> Vec<Id> {
+    let (from, did_something) =
+      egraph.union_instantiations(&self.applier1.ast, &self.applier2.ast, subst, rule_name);
+    if did_something {
+      vec![from]
+    } else {
+      vec![]
+    }
+  }
+
+  fn get_pattern_ast(&self) -> Option<&PatternAst<SymbolLang>> {
+    None
+  }
+
+  fn vars(&self) -> Vec<Var> {
+    let mut vars = egg::Applier::<SymbolLang, N>::vars(&self.applier1);
+    vars.extend(egg::Applier::<SymbolLang, N>::vars(&self.applier2));
+    vars
   }
 }
 

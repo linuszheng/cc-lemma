@@ -101,6 +101,11 @@
   (:: ite0 (-> (Bool Bool Bool) Bool))
   (axiom ite0 (True ?x ?y) ?x)
   (axiom ite0 (False ?x ?y) ?y)  
+  (:: nateq (-> (Nat Nat) Bool))
+  (axiom nateq (Zero Zero) True)
+  (axiom nateq (Zero (Succ ?x)) False)
+  (axiom nateq ((Succ ?x) Zero) False)
+  (axiom nateq ((Succ ?x) (Succ ?y)) (nateq ?x ?y))
   
   (=== optimize (inp0) (CList) (main inp0) (mainNew inp0))
 )

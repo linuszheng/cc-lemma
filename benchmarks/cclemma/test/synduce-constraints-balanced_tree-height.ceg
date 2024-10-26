@@ -29,11 +29,6 @@
   (let tf0 (?tv3) (tf1 ?tv3))
   (:: height (-> (Tree) Nat))
   (let height (?tv2) (tf0 ?tv2))
-  (:: nateq (-> (Nat Nat) Bool))
-  (axiom nateq (Zero Zero) True)
-  (axiom nateq (Zero (Succ ?x)) False)
-  (axiom nateq ((Succ ?x) Zero) False)
-  (axiom nateq ((Succ ?x) (Succ ?y)) (nateq ?x ?y))
   (:: tf3 (-> (Tree) Bool))
   (let tf3 ((Nil ?tv12)) True)
   (let tf3 ((Node ?tv13 ?tv14 ?tv15)) (and (and (nateq (height ?tv14) (height ?tv15)) (tf2 ?tv14)) (tf2 ?tv15)))
@@ -67,6 +62,11 @@
   (:: ite0 (-> (Bool Bool Bool) Bool))
   (axiom ite0 (True ?x ?y) ?x)
   (axiom ite0 (False ?x ?y) ?y)  
+  (:: nateq (-> (Nat Nat) Bool))
+  (axiom nateq (Zero Zero) True)
+  (axiom nateq (Zero (Succ ?x)) False)
+  (axiom nateq ((Succ ?x) Zero) False)
+  (axiom nateq ((Succ ?x) (Succ ?y)) (nateq ?x ?y))
 
 
 
