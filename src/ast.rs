@@ -126,6 +126,7 @@ pub fn mangle_sexp(sexp: &Sexp) -> Sexp {
 lazy_static! {
   pub static ref BOOL_TYPE: String = mangle_name("Bool");
   pub static ref ITE: String = mangle_name("ite");
+  pub static ref NATEQ: String = mangle_name("nateq");
   pub static ref ITE_MAX_N: usize = 5;
   pub static ref TRUE: String = mangle_name("True");
   pub static ref FALSE: String = mangle_name("False");

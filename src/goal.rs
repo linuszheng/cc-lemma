@@ -1096,30 +1096,30 @@ impl<'a> Goal<'a> {
     cvecs_equal(&self.egraph.analysis.cvec_analysis, lhs_cvec, rhs_cvec)
   }
 
-  pub fn is_implication_with_and(&mut self) -> bool {
-    let sexp = &self.eq.rhs.sexp;
-    println!("examining expr: {}", sexp);
-    match sexp.clone() {
-      Sexp::List(children) => {
-        let mut child_iter = children.iter();
-        let f = child_iter.next().unwrap().clone();
-        let ite_str = format!("{}{}", *ITE, 0);
-        if f == Sexp::String(ite_str) {
-          let mut cond = child_iter.next().unwrap().clone();
-          let atom_sexps = get_atoms_sexp(cond.clone());
-          println!("has an ite");
-          let is_guard = match cond {
-            Sexp::String(s) => s.starts_with("g_"),
-            _ => false,
-          };
-          atom_sexps.len() > 1 || is_guard
-        } else {
-          false
-        }
-      }
-      _ => false,
-    }
-  }
+  // pub fn is_implication_with_and(&mut self) -> bool {
+  //   let sexp = &self.eq.rhs.sexp;
+  //   println!("examining expr: {}", sexp);
+  //   match sexp.clone() {
+  //     Sexp::List(children) => {
+  //       let mut child_iter = children.iter();
+  //       let f = child_iter.next().unwrap().clone();
+  //       let ite_str = format!("{}{}", *ITE, 0);
+  //       if f == Sexp::String(ite_str) {
+  //         let mut cond = child_iter.next().unwrap().clone();
+  //         let atom_sexps = get_atoms_sexp(cond.clone());
+  //         println!("has an ite");
+  //         let is_guard = match cond {
+  //           Sexp::String(s) => s.starts_with("g_"),
+  //           _ => false,
+  //         };
+  //         atom_sexps.len() > 1 || is_guard
+  //       } else {
+  //         false
+  //       }
+  //     }
+  //     _ => false,
+  //   }
+  // }
 
   pub fn is_implication(&mut self) -> bool {
     let sexp = &self.eq.rhs.sexp;
@@ -1196,10 +1196,25 @@ impl<'a> Goal<'a> {
       )
       .unwrap()
     };
+    let lem4 = {
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", *NATEQ).parse().unwrap();
+      let rhs1: Pattern<SymbolLang> = format!("?a").parse().unwrap();
+      let rhs2: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      Rewrite::new(
+        format!("special4"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        SeparateRewriteApplier::new(rhs1, rhs2),
+      )
+      .unwrap()
+    };
 
     temp_lemmas.push(&lem1);
     temp_lemmas.push(&lem2);
     temp_lemmas.push(&lem3);
+    temp_lemmas.push(&lem4);
     println!("SELF LEMMAS: {:?}", self.lemmas.values());
     println!("TOP LEMMAS: {:?}", top_lemmas.values());
     println!("TEMP LEMMAS: {:?}", temp_lemmas);
@@ -3550,6 +3565,8 @@ impl<'a> LemmaProofState<'a> {
     println!("blocking vars: {:?}", blocking_vars.clone());
     if let Some(scrutinee) = goal.next_scrutinee(blocking_vars) {
       println!("CASE SPLIT on {}", scrutinee.name);
+      // TODO SCRUTINEE CHECK
+      // if goal.local_context.get(&scrutinee.name).unwrap().to_string() != BOOL_TYPE.clone() {}
       if CONFIG.verbose {
         println!(
           "{}: {}",
