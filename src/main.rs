@@ -58,6 +58,7 @@ fn main() -> Result<()> {
     let mut goal = Goal::top(
       &raw_goal.name,
       &raw_goal.prop,
+      None,
       &raw_goal.premise,
       global_search_state,
     );

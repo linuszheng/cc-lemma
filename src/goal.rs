@@ -424,85 +424,49 @@ fn create_implies_equations(
 
   let mut res = vec![];
   // A IMPLIES B
-  let implies_rw: Rewrite<SymbolLang, CycleggAnalysis> = if a_vars.is_subset(&b_vars) {
-    create_implies_rewrite_lt(a_pat.clone(), b_pat.clone(), true)
-  } else {
-    create_implies_rewrite_gt(a_pat.clone(), b_pat.clone(), true)
-  };
+  let implies_rw = create_implies_rewrite(
+    a_vars.clone(),
+    b_vars.clone(),
+    a_pat.clone(),
+    b_pat.clone(),
+    true,
+    None,
+  );
   let eq = Equation::new(a_implies_b, true_sexp.clone());
   res.push((eq, implies_rw));
   // A IMPLIES NOT B
-  let implies_rw = if a_vars.is_subset(&b_vars) {
-    create_implies_rewrite_lt(a_pat.clone(), b_pat.clone(), false)
-  } else {
-    create_implies_rewrite_gt(a_pat.clone(), b_pat.clone(), false)
-  };
+  let implies_rw = create_implies_rewrite(
+    a_vars.clone(),
+    b_vars.clone(),
+    a_pat.clone(),
+    b_pat.clone(),
+    false,
+    None,
+  );
   let eq = Equation::new(a_implies_not_b, true_sexp.clone());
   res.push((eq, implies_rw));
   // B IMPLIES A
-  let implies_rw = if b_vars.is_subset(&a_vars) {
-    create_implies_rewrite_lt(b_pat.clone(), a_pat.clone(), true)
-  } else {
-    create_implies_rewrite_gt(b_pat.clone(), a_pat.clone(), true)
-  };
+  let implies_rw = create_implies_rewrite(
+    b_vars.clone(),
+    a_vars.clone(),
+    b_pat.clone(),
+    a_pat.clone(),
+    true,
+    None,
+  );
   let eq = Equation::new(b_implies_a, true_sexp.clone());
   res.push((eq, implies_rw));
   // B IMPLIES NOT A
-  let implies_rw = if b_vars.is_subset(&a_vars) {
-    create_implies_rewrite_lt(b_pat.clone(), a_pat.clone(), false)
-  } else {
-    create_implies_rewrite_gt(b_pat.clone(), a_pat.clone(), false)
-  };
+  let implies_rw = create_implies_rewrite(
+    b_vars.clone(),
+    a_vars.clone(),
+    b_pat.clone(),
+    a_pat.clone(),
+    false,
+    None,
+  );
   let eq = Equation::new(b_implies_not_a, true_sexp);
   res.push((eq, implies_rw));
-
-  // for real_rhs_rec in vec![rhs_rec, &rhs_rec_not] {
-  //   let implies_expr = implies_op.join_recexprs(|id| {
-  //     if id == Id::from(0) {
-  //       &lhs_rec
-  //     } else if id == Id::from(1) {
-  //       &real_rhs_rec
-  //     } else {
-  //       &true_expr
-  //     }
-  //   });
-
-  //   let lemma_number = 0; // this is not used
-  //                         // this could be changed in the future for arb interpolation
-  //   let implies_rw = {
-  //     if lhs_vars.is_subset(&rhs_vars) {
-  //       create_implies_rewrite_lt(lhs_pat.clone(), rhs_pat.clone(), real_rhs_rec == rhs_rec)
-  //     } else {
-  //       create_implies_rewrite_gt(lhs_pat.clone(), rhs_pat.clone(), real_rhs_rec == rhs_rec)
-  //     }
-  //   };
-  //   let lemma_rw_opt = self.make_lemma_rewrite_type_only(
-  //     &implies_expr,
-  //     &true_expr,
-  //     lemma_number,
-  //     true,
-  //     Some(implies_rw),
-  //   );
-  //   if let Some(lemma_rw) = lemma_rw_opt {
-  //     println!("adding lemma: {}", lemma_rw.lemma_prop);
-  //     lemmas.push(lemma_rw.lemma_prop);
-  //   }
-  // RIPPLE-VERIFY-CONFIG generalizations
-  // let mut new_params = prop.params.clone();
-  // let mut lhs_vars_str = lhs_vars.iter().map(|x| x.to_string());
-  // let mut rhs_vars_str = lhs_vars.iter().map(|x| x.to_string());
-  // new_params.retain(|(var, _ty)| {
-  //   lhs_vars_str.contains(&var.to_string()) || rhs_vars_str.contains(&var.to_string())
-  // });
-  // new_params.push((var_symb, ty));
-  //       // println!("Generalization candidate LHS: {}", new_lhs);
-  //       // println!("Generalization candidate RHS: {}", new_rhs);
-  //       output.push(Prop::new(Equation::new(new_lhs, new_rhs), new_params));
-  // lemmas.push(Prop::new(
-  //   Equation::from_exprs(lhs_rec, rhs_rec),
-  //   new_params,
-  // ));
-  // or not
   res
 }
 
@@ -894,6 +858,7 @@ fn create_implies_rewrite_lt(
   lhs: Pattern<SymbolLang>,
   rhs: Pattern<SymbolLang>,
   rhs_val: bool,
+  cond: Option<SoundnessWithType>,
 ) -> Rw {
   // LHS-VARS < RHS-VARS
   let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
@@ -911,21 +876,37 @@ fn create_implies_rewrite_lt(
     rhs.clone(),
     pattern_val.clone()
   );
-  Rewrite::new(
-    format!("special1"),
-    rhs,
-    ConditionalApplier {
-      applier: pattern_val.clone(),
-      condition: ConditionEqual::new(lhs, pattern_true),
-    },
-  )
-  .unwrap()
+  if let Some(c) = cond {
+    Rewrite::new(
+      format!("special1"),
+      ConditionalSearcher {
+        searcher: rhs,
+        condition: c,
+      },
+      ConditionalApplier {
+        applier: pattern_val.clone(),
+        condition: ConditionEqual::new(lhs, pattern_true),
+      },
+    )
+    .unwrap()
+  } else {
+    Rewrite::new(
+      format!("special1"),
+      rhs,
+      ConditionalApplier {
+        applier: pattern_val.clone(),
+        condition: ConditionEqual::new(lhs, pattern_true),
+      },
+    )
+    .unwrap()
+  }
 }
 
 fn create_implies_rewrite_gt(
   lhs: Pattern<SymbolLang>,
   rhs: Pattern<SymbolLang>,
   rhs_val: bool,
+  cond: Option<SoundnessWithType>,
 ) -> Rw {
   // LHS-VARS > RHS-VARS
   let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
@@ -943,15 +924,45 @@ fn create_implies_rewrite_gt(
     rhs.clone(),
     pattern_val.clone()
   );
-  Rewrite::new(
-    format!("special2"),
-    ConditionalSearcher {
-      searcher: lhs.clone(),
-      condition: StrEquality::new(TRUE.clone()),
-    },
-    SeparateRewriteApplier::new(rhs, pattern_val.clone()),
-  )
-  .unwrap()
+  if let Some(c) = cond {
+    Rewrite::new(
+      format!("special2"),
+      ConditionalSearcher {
+        searcher: ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        condition: c,
+      },
+      SeparateRewriteApplier::new(rhs, pattern_val.clone()),
+    )
+    .unwrap()
+  } else {
+    Rewrite::new(
+      format!("special2"),
+      ConditionalSearcher {
+        searcher: lhs.clone(),
+        condition: StrEquality::new(TRUE.clone()),
+      },
+      SeparateRewriteApplier::new(rhs, pattern_val.clone()),
+    )
+    .unwrap()
+  }
+}
+
+fn create_implies_rewrite(
+  a_vars: BTreeSet<String>,
+  b_vars: BTreeSet<String>,
+  a_pat: Pattern<SymbolLang>,
+  b_pat: Pattern<SymbolLang>,
+  rhs_val: bool,
+  cond: Option<SoundnessWithType>,
+) -> Rw {
+  if a_vars.is_subset(&b_vars) {
+    create_implies_rewrite_lt(a_pat, b_pat, rhs_val, cond)
+  } else {
+    create_implies_rewrite_gt(a_pat, b_pat, rhs_val, cond)
+  }
 }
 
 /// Proof goal
@@ -983,6 +994,8 @@ pub struct Goal<'a> {
   grounding_instantiations: Vec<IdSubst>,
   /// The equation we are trying to prove
   pub eq: ETermEquation,
+  // If this is a special conditional prop, the rewrite
+  pub implies_rw: Option<Rw>,
   /// If this is a conditional prop, the premises
   pub premises: Vec<ETermEquation>,
   /// Stores the expression each guard variable maps to
@@ -998,12 +1011,13 @@ impl<'a> Goal<'a> {
   pub fn top(
     name: &str,
     prop: &Prop,
+    implies_rw: Option<Rw>,
     premise: &Option<Equation>,
     global_search_state: GlobalSearchState<'a>,
   ) -> Self {
     let mut egraph: Eg = EGraph::default().with_explanations_enabled();
     egraph.analysis.global_ctx = global_search_state.context.clone();
-    let eq = ETermEquation::new(&prop.eq, &mut egraph, false);
+    let eq: ETermEquation = ETermEquation::new(&prop.eq, &mut egraph, false);
     let premise = premise
       .as_ref()
       .map(|eq| ETermEquation::new(eq, &mut egraph, true));
@@ -1022,6 +1036,7 @@ impl<'a> Goal<'a> {
       guard_exprs: BTreeMap::new(),
       scrutinees: VecDeque::new(),
       eq,
+      implies_rw,
       // Convert to a singleton list if the Option is Some, else the empty list
       premises: premise.into_iter().collect(),
       global_search_state,
@@ -1488,6 +1503,184 @@ impl<'a> Goal<'a> {
     }
   }
 
+  fn make_lemma_rewrite_implies(
+    &self,
+    lhs_expr: &Expr,
+    rhs_expr: &Expr,
+    premises: &Vec<ETermEquation>,
+    lemma_number: usize,
+    exclude_wildcards: bool,
+  ) -> Option<LemmaRewrite<CycleggAnalysis>> {
+    let is_var = |v| self.local_context.contains_key(v);
+    println!("INSIDE MLRI");
+    // NOTE: (CK) Before we would not recreate the lhs from lhs_expr every time
+    // we made a lemma rewrite since we did nested for loops
+    //
+    // for lhs_expr {
+    //   let lhs = ...
+    //   for rhs_expr {
+    //   ...
+    //
+    // which meant we just needed to clone it.
+    //
+    // I don't think this is a huge hit to efficiency though. If we cared, we
+    // could instead loop over all lhs and rhs exprs first and precompute their
+    // patterns + figure out which ones we don't need to consider.
+    let lhs: Pattern<SymbolLang> = to_pattern(lhs_expr, is_var);
+    if (CONFIG.irreducible_only && self.is_reducible(lhs_expr))
+      || (exclude_wildcards && has_guard_wildcards(&lhs))
+    {
+      return None;
+    }
+
+    let rhs: Pattern<SymbolLang> = to_pattern(rhs_expr, is_var);
+    if (CONFIG.irreducible_only && self.is_reducible(rhs_expr))
+      || (exclude_wildcards && has_guard_wildcards(&rhs))
+    {
+      return None;
+    }
+
+    let lhs_vars = var_set(&lhs);
+    let rhs_vars = var_set(&rhs);
+    // println!("lhs vars: {:?}", lhs_vars);
+    // println!("rhs vars: {:?}", rhs_vars);
+    let lemma_vars = lhs_vars.union(&rhs_vars).cloned().collect();
+    // println!("trying to make lemma rewrite forall {:?}. {} = {}", lemma_vars, lhs, rhs);
+
+    // If any of my premises contain variables that are not present in lhs or rhs,
+    // skip because we don't know how to check such a premise
+    if !premises.iter().all(|eq| {
+      let premise_lhs_vars = var_set(&to_pattern(&eq.lhs.expr, is_var));
+      let premise_rhs_vars = var_set(&to_pattern(&eq.rhs.expr, is_var));
+      let premise_vars: BTreeSet<Var> =
+        premise_lhs_vars.union(&premise_rhs_vars).cloned().collect();
+      premise_vars.is_subset(&lemma_vars)
+    }) {
+      return None;
+    }
+
+    // Pick out those variables that occur in the lemma
+    let lemma_var_classes: IdSubst = self
+      .var_classes
+      .iter()
+      .filter(|(x, _)| lemma_vars.contains(&to_wildcard(x)))
+      .map(|(x, id)| (*x, *id))
+      .collect();
+    let params: Vec<(Symbol, Type)> = lemma_var_classes
+      .keys()
+      .map(|var| (*var, self.local_context.get(var).unwrap().clone()))
+      .collect();
+
+    let mut condition = SoundnessWithType {
+      soundness: Some(Soundness {
+        free_vars: lemma_var_classes,
+        premises: premises.clone(),
+      }),
+      type_cons: None,
+    };
+    if let Some(ty) = self.get_expected_type(lhs_expr, rhs_expr) {
+      condition.type_cons = Some(TypeRestriction {
+        ty,
+        ctx: self.global_search_state.context.clone(),
+      })
+    }
+
+    let rewrite_eq = Equation::from_exprs(lhs_expr, rhs_expr);
+    // println!("make lemma {} {}", rewrite_eq, params.iter().map(|(name, ty)| format!("{}[{}]", name, ty)).join(" "));
+    let mut lemma_rw = LemmaRewrite {
+      lhs_to_rhs: None,
+      rhs_to_lhs: None,
+      implies_rw: None,
+      lemma_number,
+      lemma_prop: Prop::new(rewrite_eq, params.clone()),
+    };
+    let lemma_name = lemma_rw.lemma_name();
+    if rhs_vars.is_subset(&lhs_vars) {
+      // if rhs has no extra wildcards, create a lemma lhs => rhs
+      let lhs_to_rhs = Goal::make_rewrite_with_type_condition(
+        lhs.clone(),
+        rhs.clone(),
+        condition.clone(),
+        lemma_name.clone(),
+      );
+      lemma_rw.lhs_to_rhs = Some(lhs_to_rhs);
+
+      if CONFIG.single_rhs {
+        return Some(lemma_rw);
+      };
+    }
+    if lhs_vars.is_subset(&rhs_vars) {
+      // if lhs has no extra wildcards, create a lemma rhs => lhs;
+      // NOTE: (CK) This below comment is no longer true when our termination check is more complicated.
+      // in non-cyclic mode, a single direction of IH is always sufficient
+      // (because grounding adds all instantiations we could possibly care about).
+      let rhs_to_lhs = Goal::make_rewrite_with_type_condition(
+        rhs.clone(),
+        lhs.clone(),
+        condition.clone(),
+        lemma_name.clone(),
+      );
+      lemma_rw.rhs_to_lhs = Some(rhs_to_lhs);
+    }
+    // LMTODO
+    if let Some(_) = self.implies_rw {
+      let lhs_sexp = symbolic_expressions::parser::parse_str(&lhs.ast.to_string()).unwrap();
+      let rhs_sexp = symbolic_expressions::parser::parse_str(&rhs.ast.to_string()).unwrap();
+      let conditional = rhs_sexp.list().unwrap()[1].clone();
+      let antecedent = rhs_sexp.list().unwrap()[2].clone();
+      let result = lhs_sexp.string().unwrap();
+      assert!(*result == *TRUE);
+      let mut implies_rw = None;
+      let a_vars: BTreeSet<String> =
+        var_set::<SymbolLang>(&Pattern::from_str(&conditional.to_string()).unwrap())
+          .iter()
+          .map(|x| x.to_string())
+          .collect();
+      let b_vars: BTreeSet<String> =
+        var_set::<SymbolLang>(&Pattern::from_str(&antecedent.to_string()).unwrap())
+          .iter()
+          .map(|x| x.to_string())
+          .collect();
+      if let Ok(ant) = antecedent.list() {
+        if let Ok(op) = ant[0].string() {
+          let new_antecedent = ant[1].to_string();
+          if *op == *NOT {
+            println!("CREATING NOT RW");
+            implies_rw = Some(create_implies_rewrite(
+              a_vars.clone(),
+              b_vars.clone(),
+              Pattern::from_str(&conditional.to_string()).unwrap(),
+              Pattern::from_str(&new_antecedent.to_string()).unwrap(),
+              false,
+              Some(condition.clone()),
+            ));
+          }
+        }
+      }
+      if implies_rw.is_none() {
+        println!("CREATING YES RW");
+        implies_rw = Some(create_implies_rewrite(
+          a_vars,
+          b_vars,
+          Pattern::from_str(&conditional.to_string()).unwrap(),
+          Pattern::from_str(&antecedent.to_string()).unwrap(),
+          true,
+          Some(condition.clone()),
+        ));
+      }
+      lemma_rw.implies_rw = Some((format!("special3"), implies_rw.unwrap()));
+      Some(lemma_rw)
+    } else {
+      let has_lemma_rw = lemma_rw.lhs_to_rhs.is_some() || lemma_rw.rhs_to_lhs.is_some();
+      if !has_lemma_rw {
+        warn!("cannot create a lemma from {} and {}", lhs, rhs);
+        None
+      } else {
+        Some(lemma_rw)
+      }
+    }
+  }
+
   /// Creates a lemma rewrite that does not check for soundness before applying.
   ///
   /// TODO: There's a lot of code duplication here because the checked rewrite
@@ -1720,32 +1913,37 @@ impl<'a> Goal<'a> {
     // previous lemmas), we will make lemma rewrites out of the lhs and rhs only
     // and we will use the special IH name.
     if self.lemmas.is_empty() {
-      let premises = self.update_premises();
       let mut rewrites = self.lemmas.clone();
-      // In the non-cyclic case, only use the original LHS and RHS
-      // and only if no other lemmas have been added yet
-      let lemma_rw = self.make_lemma_rewrite(
-        &self.eq.lhs.expr,
-        &self.eq.rhs.expr,
-        &premises,
-        ih_lemma_number,
-        false,
-      );
-      if lemma_rw.is_none() {
-        println!(
-          "{}: {} == {}. params: {:?}",
-          self.name, self.eq.lhs.sexp, self.eq.rhs.sexp, self.top_level_params
+      if let Some(rw) = &self.implies_rw {
+        let lemma_rw = self.make_lemma_rewrite_implies(
+          &self.eq.lhs.expr,
+          &self.eq.rhs.expr,
+          &self.premises,
+          ih_lemma_number,
+          false,
         );
-        panic!()
+        lemma_rw.unwrap().add_to_rewrites(&mut rewrites);
+      } else {
+        let premises = self.update_premises();
+        // In the non-cyclic case, only use the original LHS and RHS
+        // and only if no other lemmas have been added yet
+        let lemma_rw = self.make_lemma_rewrite(
+          &self.eq.lhs.expr,
+          &self.eq.rhs.expr,
+          &premises,
+          ih_lemma_number,
+          false,
+        );
+        if lemma_rw.is_none() {
+          println!(
+            "{}: {} == {}. params: {:?}",
+            self.name, self.eq.lhs.sexp, self.eq.rhs.sexp, self.top_level_params
+          );
+          panic!()
+        }
+        lemma_rw.unwrap().add_to_rewrites(&mut rewrites);
       }
-      // RIPPLE-VERIFY-TODO: check if this is a good use of their method, and get rid of above code
-      // BEFORE
-      let lemma_rw = lemma_rw.unwrap();
-      lemma_rw.add_to_rewrites(&mut rewrites);
       return rewrites;
-      // AFTER
-      // return self.make_cyclic_lemma_rewrites(timer, lemmas_state, true).0;
-      // END
     }
     // Otherwise, we only create lemmas when we are operating in the cyclic mode
     if CONFIG.is_cyclic() {
@@ -1895,6 +2093,7 @@ impl<'a> Goal<'a> {
   }
 
   /// Consume this goal and add its case splits to the proof state
+  /// TODO: find out how to case split an implication to produce a IH
   fn case_split(
     self,
     scrutinee: Scrutinee,
@@ -2983,6 +3182,7 @@ impl<'a> Goal<'a> {
     let mut new_goal = Goal::top(
       &format!("{}_gen", self.name),
       &prop,
+      None,
       &None,
       self.global_search_state,
     );
@@ -3338,7 +3538,13 @@ impl<'a> LemmaProofState<'a> {
     proof_depth: usize,
   ) -> Self {
     let lemma_name = get_lemma_name(lemma_number);
-    let mut goal = Goal::top(&lemma_name, &prop, premise, global_search_state);
+    let mut goal = Goal::top(
+      &lemma_name,
+      &prop,
+      implies_rw.clone(),
+      premise,
+      global_search_state,
+    );
     let lemma_rw_opt = goal.make_lemma_rewrite_type_only(
       &goal.eq.lhs.expr,
       &goal.eq.rhs.expr,
@@ -3529,9 +3735,6 @@ impl<'a> LemmaProofState<'a> {
             for mut g in goals_mod.clone().into_iter() {
               println!("inside a goal: ");
               g._print_lhs_rhs();
-              for rw in lemmas_state.lemma_rewrites.clone() {
-                println!("LMRW: {:?}", rw);
-              }
               println!("scrutinees: {:?}", g.scrutinees);
               g.saturate(&lemmas_state.lemma_rewrites);
               let (blocking_vars, _) = g.find_blocking(timer);
