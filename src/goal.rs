@@ -1627,7 +1627,7 @@ impl<'a> Goal<'a> {
       let lhs_sexp = symbolic_expressions::parser::parse_str(&lhs.ast.to_string()).unwrap();
       let rhs_sexp = symbolic_expressions::parser::parse_str(&rhs.ast.to_string()).unwrap();
       let conditional = rhs_sexp.list().unwrap()[1].clone();
-      let antecedent = rhs_sexp.list().unwrap()[2].clone();
+      let consequent = rhs_sexp.list().unwrap()[2].clone();
       let result = lhs_sexp.string().unwrap();
       assert!(*result == *TRUE);
       let mut implies_rw = None;
@@ -1637,20 +1637,20 @@ impl<'a> Goal<'a> {
           .map(|x| x.to_string())
           .collect();
       let b_vars: BTreeSet<String> =
-        var_set::<SymbolLang>(&Pattern::from_str(&antecedent.to_string()).unwrap())
+        var_set::<SymbolLang>(&Pattern::from_str(&consequent.to_string()).unwrap())
           .iter()
           .map(|x| x.to_string())
           .collect();
-      if let Ok(ant) = antecedent.list() {
+      if let Ok(ant) = consequent.list() {
         if let Ok(op) = ant[0].string() {
-          let new_antecedent = ant[1].to_string();
+          let new_consequent = ant[1].to_string();
           if *op == *NOT {
             println!("CREATING NOT RW");
             implies_rw = Some(create_implies_rewrite(
               a_vars.clone(),
               b_vars.clone(),
               Pattern::from_str(&conditional.to_string()).unwrap(),
-              Pattern::from_str(&new_antecedent.to_string()).unwrap(),
+              Pattern::from_str(&new_consequent.to_string()).unwrap(),
               false,
               Some(condition.clone()),
             ));
@@ -1663,7 +1663,7 @@ impl<'a> Goal<'a> {
           a_vars,
           b_vars,
           Pattern::from_str(&conditional.to_string()).unwrap(),
-          Pattern::from_str(&antecedent.to_string()).unwrap(),
+          Pattern::from_str(&consequent.to_string()).unwrap(),
           true,
           Some(condition.clone()),
         ));
