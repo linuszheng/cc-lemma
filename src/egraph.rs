@@ -510,47 +510,6 @@ where
   }
 }
 
-pub struct SeparateRewriteApplier {
-  searcher: Pattern<SymbolLang>,
-  applier: Pattern<SymbolLang>,
-}
-
-impl SeparateRewriteApplier {
-  pub fn new(searcher: Pattern<SymbolLang>, applier: Pattern<SymbolLang>) -> Self {
-    Self { searcher, applier }
-  }
-}
-
-impl<N> Applier<SymbolLang, N> for SeparateRewriteApplier
-where
-  N: Analysis<SymbolLang>,
-{
-  fn apply_one(
-    &self,
-    egraph: &mut egg::EGraph<SymbolLang, N>,
-    eclass: Id,
-    subst: &Subst,
-    searcher_ast: Option<&PatternAst<SymbolLang>>,
-    rule_name: Symbol,
-  ) -> Vec<Id> {
-    let (from, did_something) =
-      egraph.union_instantiations(&self.searcher.ast, &self.applier.ast, subst, rule_name);
-    if did_something {
-      vec![from]
-    } else {
-      vec![]
-    }
-  }
-
-  fn get_pattern_ast(&self) -> Option<&PatternAst<SymbolLang>> {
-    egg::Applier::<SymbolLang, N>::get_pattern_ast(&self.applier)
-  }
-
-  fn vars(&self) -> Vec<Var> {
-    egg::Applier::<SymbolLang, N>::vars(&self.applier)
-  }
-}
-
 pub struct DualApplier {
   applier1: Pattern<SymbolLang>,
   applier2: Pattern<SymbolLang>,

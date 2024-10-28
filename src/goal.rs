@@ -661,6 +661,10 @@ impl<A: Analysis<SymbolLang> + Clone> LemmaRewrite<A> {
       println!("adding impl rw!");
       rewrites.entry(name.clone()).or_insert(rw.clone());
     }
+    if let Some((name, rw)) = self.implies_rw_cntpos.as_ref() {
+      println!("adding impl rw!");
+      rewrites.entry(name.clone()).or_insert(rw.clone());
+    }
   }
 }
 
@@ -949,7 +953,7 @@ fn create_implies_rewrite_gt(
         },
         condition: c,
       },
-      SeparateRewriteApplier::new(rhs, pattern_val.clone()),
+      DualApplier::new(rhs, pattern_val.clone()),
     )
     .unwrap()
   } else {
@@ -959,7 +963,7 @@ fn create_implies_rewrite_gt(
         searcher: lhs.clone(),
         condition: StrEquality::new(cond_val.clone()),
       },
-      SeparateRewriteApplier::new(rhs, pattern_val.clone()),
+      DualApplier::new(rhs, pattern_val.clone()),
     )
     .unwrap()
   }
@@ -1208,7 +1212,7 @@ impl<'a> Goal<'a> {
           searcher: lhs.clone(),
           condition: StrEquality::new(TRUE.clone()),
         },
-        SeparateRewriteApplier::new(rhs, pattern_true.clone()),
+        DualApplier::new(rhs, pattern_true.clone()),
       )
       .unwrap()
     };
@@ -1223,7 +1227,7 @@ impl<'a> Goal<'a> {
           searcher: lhs.clone(),
           condition: StrEquality::new(TRUE.clone()),
         },
-        SeparateRewriteApplier::new(rhs, pattern_true.clone()),
+        DualApplier::new(rhs, pattern_true.clone()),
       )
       .unwrap()
     };
@@ -1237,7 +1241,7 @@ impl<'a> Goal<'a> {
           searcher: lhs.clone(),
           condition: StrEquality::new(TRUE.clone()),
         },
-        SeparateRewriteApplier::new(rhs1, rhs2),
+        DualApplier::new(rhs1, rhs2),
       )
       .unwrap()
     };
@@ -1256,7 +1260,6 @@ impl<'a> Goal<'a> {
       )
       .unwrap()
     };
-
     temp_lemmas.push(&lem1);
     temp_lemmas.push(&lem2);
     temp_lemmas.push(&lem3);
@@ -3827,7 +3830,7 @@ impl<'a> LemmaProofState<'a> {
     if let Some(scrutinee) = goal.next_scrutinee(blocking_vars) {
       println!("CASE SPLIT on {}", scrutinee.name);
       // TODO SCRUTINEE CHECK
-      // if goal.local_context.get(&scrutinee.name).unwrap().to_string() != BOOL_TYPE.clone() {}
+      // if egraph {}
       if CONFIG.verbose {
         println!(
           "{}: {}",
@@ -4463,6 +4466,20 @@ pub fn explain_goal_failure(goal: &Goal) {
 fn find_proof(eq: &ETermEquation, egraph: &mut Eg) -> Option<ProofLeaf> {
   let resolved_lhs_id = egraph.find(eq.lhs.id);
   let resolved_rhs_id = egraph.find(eq.rhs.id);
+  println!(
+    "find proof lhs: {}\n {}\n {}\n {:?}",
+    eq.lhs.sexp,
+    resolved_lhs_id,
+    egraph.id_to_expr(resolved_lhs_id),
+    egraph[resolved_lhs_id].data.canonical_form_data
+  );
+  println!(
+    "find proof rhs: {}\n {}\n {}\n {:?}",
+    eq.rhs.sexp,
+    resolved_rhs_id,
+    egraph.id_to_expr(resolved_rhs_id),
+    egraph[resolved_rhs_id].data.canonical_form_data
+  );
   // Have we proven LHS == RHS?
   if resolved_lhs_id == resolved_rhs_id {
     if egraph.lookup_expr(&eq.lhs.expr).is_none() || egraph.lookup_expr(&eq.rhs.expr).is_none() {
@@ -4471,6 +4488,7 @@ fn find_proof(eq: &ETermEquation, egraph: &mut Eg) -> Option<ProofLeaf> {
         eq.lhs.expr, eq.rhs.expr
       );
     }
+    println!("proof by equivalence");
     return Some(ProofLeaf::Refl(
       egraph.explain_equivalence(&eq.lhs.expr, &eq.rhs.expr),
     ));
@@ -4519,6 +4537,7 @@ fn find_proof(eq: &ETermEquation, egraph: &mut Eg) -> Option<ProofLeaf> {
   });
   if let Some((expr1, expr2)) = inconsistent_exprs {
     let explanation = egraph.explain_equivalence(&expr1, &expr2);
+    println!("proof by impossibility");
     Some(ProofLeaf::Contradiction(explanation))
   } else {
     None
