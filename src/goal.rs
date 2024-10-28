@@ -430,6 +430,7 @@ fn create_implies_equations(
     a_pat.clone(),
     b_pat.clone(),
     true,
+    true,
     None,
   );
   let eq = Equation::new(a_implies_b, true_sexp.clone());
@@ -440,6 +441,7 @@ fn create_implies_equations(
     b_vars.clone(),
     a_pat.clone(),
     b_pat.clone(),
+    true,
     false,
     None,
   );
@@ -452,6 +454,7 @@ fn create_implies_equations(
     b_pat.clone(),
     a_pat.clone(),
     true,
+    true,
     None,
   );
   let eq = Equation::new(b_implies_a, true_sexp.clone());
@@ -462,6 +465,7 @@ fn create_implies_equations(
     a_vars.clone(),
     b_pat.clone(),
     a_pat.clone(),
+    true,
     false,
     None,
   );
@@ -601,6 +605,7 @@ pub struct LemmaRewrite<A> {
   pub lhs_to_rhs: Option<(String, Rewrite<SymbolLang, A>)>,
   pub rhs_to_lhs: Option<(String, Rewrite<SymbolLang, A>)>,
   pub implies_rw: Option<(String, Rewrite<SymbolLang, A>)>,
+  pub implies_rw_cntpos: Option<(String, Rewrite<SymbolLang, A>)>,
   pub lemma_number: usize,
   pub lemma_prop: Prop,
 }
@@ -610,6 +615,7 @@ impl<A: Analysis<SymbolLang> + Clone> LemmaRewrite<A> {
     lhs_to_rhs: Option<(String, Rewrite<SymbolLang, A>)>,
     rhs_to_lhs: Option<(String, Rewrite<SymbolLang, A>)>,
     implies_rw: Option<(String, Rewrite<SymbolLang, A>)>,
+    implies_rw_cntpos: Option<(String, Rewrite<SymbolLang, A>)>,
     lemma_number: usize,
     lemma_prop: Prop,
   ) -> Self {
@@ -617,6 +623,7 @@ impl<A: Analysis<SymbolLang> + Clone> LemmaRewrite<A> {
       lhs_to_rhs,
       rhs_to_lhs,
       implies_rw,
+      implies_rw_cntpos,
       lemma_number,
       lemma_prop,
     }
@@ -856,6 +863,7 @@ fn get_output_type_name(expr: &Type) -> Symbol {
 
 fn create_implies_rewrite_lt(
   lhs: Pattern<SymbolLang>,
+  lhs_val: bool,
   rhs: Pattern<SymbolLang>,
   rhs_val: bool,
   cond: Option<SoundnessWithType>,
@@ -863,6 +871,11 @@ fn create_implies_rewrite_lt(
   // LHS-VARS < RHS-VARS
   let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
   let pattern_false: Pattern<SymbolLang> = format!("{}", *FALSE).parse().unwrap();
+  let cond_val = if lhs_val {
+    pattern_true.clone()
+  } else {
+    pattern_false.clone()
+  };
   let pattern_val = if rhs_val {
     pattern_true.clone()
   } else {
@@ -872,7 +885,7 @@ fn create_implies_rewrite_lt(
     "SEARCH FOR {}, IF {} = {}, THEN {} = {}",
     rhs.clone(),
     lhs.clone(),
-    pattern_true.clone(),
+    cond_val.clone(),
     rhs.clone(),
     pattern_val.clone()
   );
@@ -885,7 +898,7 @@ fn create_implies_rewrite_lt(
       },
       ConditionalApplier {
         applier: pattern_val.clone(),
-        condition: ConditionEqual::new(lhs, pattern_true),
+        condition: ConditionEqual::new(lhs, cond_val.clone()),
       },
     )
     .unwrap()
@@ -895,7 +908,7 @@ fn create_implies_rewrite_lt(
       rhs,
       ConditionalApplier {
         applier: pattern_val.clone(),
-        condition: ConditionEqual::new(lhs, pattern_true),
+        condition: ConditionEqual::new(lhs, cond_val),
       },
     )
     .unwrap()
@@ -904,6 +917,7 @@ fn create_implies_rewrite_lt(
 
 fn create_implies_rewrite_gt(
   lhs: Pattern<SymbolLang>,
+  lhs_val: bool,
   rhs: Pattern<SymbolLang>,
   rhs_val: bool,
   cond: Option<SoundnessWithType>,
@@ -911,6 +925,7 @@ fn create_implies_rewrite_gt(
   // LHS-VARS > RHS-VARS
   let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
   let pattern_false: Pattern<SymbolLang> = format!("{}", *FALSE).parse().unwrap();
+  let cond_val = if lhs_val { TRUE.clone() } else { FALSE.clone() };
   let pattern_val = if rhs_val {
     pattern_true.clone()
   } else {
@@ -920,7 +935,7 @@ fn create_implies_rewrite_gt(
     "SEARCH FOR {}, IF {} = {}, THEN {} = {}",
     lhs.clone(),
     lhs.clone(),
-    pattern_true.clone(),
+    cond_val.clone(),
     rhs.clone(),
     pattern_val.clone()
   );
@@ -930,7 +945,7 @@ fn create_implies_rewrite_gt(
       ConditionalSearcher {
         searcher: ConditionalSearcher {
           searcher: lhs.clone(),
-          condition: StrEquality::new(TRUE.clone()),
+          condition: StrEquality::new(cond_val.clone()),
         },
         condition: c,
       },
@@ -942,7 +957,7 @@ fn create_implies_rewrite_gt(
       format!("special2"),
       ConditionalSearcher {
         searcher: lhs.clone(),
-        condition: StrEquality::new(TRUE.clone()),
+        condition: StrEquality::new(cond_val.clone()),
       },
       SeparateRewriteApplier::new(rhs, pattern_val.clone()),
     )
@@ -955,13 +970,14 @@ fn create_implies_rewrite(
   b_vars: BTreeSet<String>,
   a_pat: Pattern<SymbolLang>,
   b_pat: Pattern<SymbolLang>,
+  lhs_val: bool,
   rhs_val: bool,
   cond: Option<SoundnessWithType>,
 ) -> Rw {
   if a_vars.is_subset(&b_vars) {
-    create_implies_rewrite_lt(a_pat, b_pat, rhs_val, cond)
+    create_implies_rewrite_lt(a_pat, lhs_val, b_pat, rhs_val, cond)
   } else {
-    create_implies_rewrite_gt(a_pat, b_pat, rhs_val, cond)
+    create_implies_rewrite_gt(a_pat, lhs_val, b_pat, rhs_val, cond)
   }
 }
 
@@ -1022,7 +1038,7 @@ impl<'a> Goal<'a> {
       .as_ref()
       .map(|eq| ETermEquation::new(eq, &mut egraph, true));
     let var_classes = lookup_vars(&egraph, prop.params.iter().map(|(x, _)| x));
-
+    // let implies_rw = ?
     let mut res = Self {
       name: name.to_string(),
       // The only instantiation we have so far is where the parameters map to themselves
@@ -1463,6 +1479,7 @@ impl<'a> Goal<'a> {
       lhs_to_rhs: None,
       rhs_to_lhs: None,
       implies_rw: None,
+      implies_rw_cntpos: None,
       lemma_number,
       lemma_prop: Prop::new(rewrite_eq, params.clone()),
     };
@@ -1591,6 +1608,7 @@ impl<'a> Goal<'a> {
       lhs_to_rhs: None,
       rhs_to_lhs: None,
       implies_rw: None,
+      implies_rw_cntpos: None,
       lemma_number,
       lemma_prop: Prop::new(rewrite_eq, params.clone()),
     };
@@ -1631,6 +1649,7 @@ impl<'a> Goal<'a> {
       let result = lhs_sexp.string().unwrap();
       assert!(*result == *TRUE);
       let mut implies_rw = None;
+      let mut implies_rw_cntpos = None;
       let a_vars: BTreeSet<String> =
         var_set::<SymbolLang>(&Pattern::from_str(&conditional.to_string()).unwrap())
           .iter()
@@ -1651,7 +1670,17 @@ impl<'a> Goal<'a> {
               b_vars.clone(),
               Pattern::from_str(&conditional.to_string()).unwrap(),
               Pattern::from_str(&new_consequent.to_string()).unwrap(),
+              true,
               false,
+              Some(condition.clone()),
+            ));
+            implies_rw_cntpos = Some(create_implies_rewrite(
+              b_vars.clone(),
+              a_vars.clone(),
+              Pattern::from_str(&new_consequent.to_string()).unwrap(),
+              Pattern::from_str(&conditional.to_string()).unwrap(),
+              false,
+              true,
               Some(condition.clone()),
             ));
           }
@@ -1660,15 +1689,26 @@ impl<'a> Goal<'a> {
       if implies_rw.is_none() {
         println!("CREATING YES RW");
         implies_rw = Some(create_implies_rewrite(
-          a_vars,
-          b_vars,
+          a_vars.clone(),
+          b_vars.clone(),
           Pattern::from_str(&conditional.to_string()).unwrap(),
           Pattern::from_str(&consequent.to_string()).unwrap(),
           true,
+          true,
+          Some(condition.clone()),
+        ));
+        implies_rw_cntpos = Some(create_implies_rewrite(
+          b_vars,
+          a_vars,
+          Pattern::from_str(&consequent.to_string()).unwrap(),
+          Pattern::from_str(&conditional.to_string()).unwrap(),
+          false,
+          false,
           Some(condition.clone()),
         ));
       }
       lemma_rw.implies_rw = Some((format!("special3"), implies_rw.unwrap()));
+      lemma_rw.implies_rw_cntpos = Some((format!("special4"), implies_rw_cntpos.unwrap()));
       Some(lemma_rw)
     } else {
       let has_lemma_rw = lemma_rw.lhs_to_rhs.is_some() || lemma_rw.rhs_to_lhs.is_some();
@@ -1757,6 +1797,7 @@ impl<'a> Goal<'a> {
       lhs_to_rhs: None,
       rhs_to_lhs: None,
       implies_rw: None,
+      implies_rw_cntpos: None,
       lemma_number,
       lemma_prop: Prop::new(rewrite_eq, params.clone()),
     };
@@ -1859,6 +1900,7 @@ impl<'a> Goal<'a> {
       lhs_to_rhs: None,
       rhs_to_lhs: None,
       implies_rw: None,
+      implies_rw_cntpos: None,
       lemma_number,
       lemma_prop: Prop::new(rewrite_eq, params.clone()),
     };
@@ -2663,7 +2705,7 @@ impl<'a> Goal<'a> {
 
   fn is_interesting(&mut self, expr: RecExpr<SymbolLang>) -> bool {
     let op2 = expr.as_ref().last().unwrap();
-    (op2.op.as_str() != *AND && op2.op.as_str() != *OR)
+    (op2.op.as_str() != *AND && op2.op.as_str() != *OR && op2.op.as_str() != *NOT)
       && !self.is_reducible(&expr)
       && expr.as_ref().len() > 1
   }
