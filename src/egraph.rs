@@ -2,6 +2,7 @@ use crate::config::CONFIG;
 use crate::utils::cartesian_product;
 use egg::*;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::{
   collections::{BTreeMap, BTreeSet},
   iter::zip,
@@ -316,20 +317,60 @@ where
   fn vars(&self) -> Vec<Var> {
     self.searcher.vars()
   }
+
+  fn get_pattern_ast(&self) -> Option<&PatternAst<L>> {
+    self.searcher.get_pattern_ast()
+  }
 }
 
 /// dual searcher
 /// does searcher1 on entire egraph, then does searcher2 on all matches
 /// warning make sure the var sets are disjoint
+///
+// pub struct DualSearcher<S, N, L>
+// where
+//   S: Searcher<L, N>,
+//   L: Language + FromOp,
+//   N: Analysis<L>,
+// {
+//   pub searcher1: S,
+//   pub searcher2: S,
+//   temp_ast_storage: RecExpr<ENodeOrVar<L>>,
+//   _marker: PhantomData<N>,
+// }
+
+// impl<S, N, L> DualSearcher<S, N, L>
+// where
+//   S: Searcher<L, N>,
+//   L: Language + FromOp,
+//   N: Analysis<L>,
+// {
+//   pub fn new(s1: S, s2: S) -> Self {
+//     let mut obj = Self {
+//       searcher1: s1,
+//       searcher2: s2,
+//       temp_ast_storage: RecExpr::default(),
+//       _marker: PhantomData,
+//     };
+//     let a = obj.searcher1.get_pattern_ast().unwrap();
+//     let b = obj.searcher2.get_pattern_ast().unwrap();
+//     let enode: ENodeOrVar<L> =
+//       ENodeOrVar::from_op("_dual_searcher", vec![Id::from(0), Id::from(1)]).unwrap();
+//     obj.temp_ast_storage = enode.join_recexprs(|id| if id == Id::from(0) { &a } else { &b });
+//     obj
+//   }
+// }
+
 pub struct DualSearcher<S> {
   pub searcher1: S,
   pub searcher2: S,
+  pub equality_between_substs: bool,
 }
 
 impl<S, N, L> Searcher<L, N> for DualSearcher<S>
 where
   S: Searcher<L, N>,
-  L: Language,
+  L: Language + FromOp,
   N: Analysis<L>,
 {
   fn search_eclass_with_limit(
@@ -339,43 +380,57 @@ where
     limit: usize,
   ) -> Option<SearchMatches<L>> {
     // Use the underlying searcher first
-    let matches1 = self
-      .searcher1
-      .search_eclass_with_limit(egraph, eclass, limit)?;
+    panic!("shouldn't use this method");
+  }
 
-    if matches1.substs.is_empty() {
-      // If all substitutions were filtered out,
-      // it's as if this eclass hasn't matched at all
-      None
-    } else {
-      let matches2 = self
-        .searcher2
-        .search_eclass_with_limit(egraph, eclass, limit)?;
-      if matches2.substs.is_empty() {
-        None
-      } else {
-        let mut substs_new: Vec<Subst> = vec![];
-        for subst1 in matches1.substs.clone() {
-          for subst2 in matches2.substs.clone() {
-            let mut new_subst_elem = subst1.clone();
-            for v in self.searcher2.vars() {
-              new_subst_elem.insert(v, subst2.get(v).unwrap().clone());
+  fn search_with_limit(&self, egraph: &EGraph<L, N>, limit: usize) -> Vec<SearchMatches<L>> {
+    let matches1 = self.searcher1.search_with_limit(egraph, limit);
+    let matches2 = self.searcher2.search_with_limit(egraph, limit);
+    let temp: Vec<Vec<(&Subst, Id)>> = matches1
+      .iter()
+      .map(|sm| sm.substs.iter().map(|s| (s, sm.eclass)).collect())
+      .collect();
+    let matches1map = temp.concat();
+    let temp: Vec<Vec<(&Subst, Id)>> = matches2
+      .iter()
+      .map(|sm| sm.substs.iter().map(|s| (s, sm.eclass)).collect())
+      .collect();
+    let matches2map = temp.concat();
+
+    let mut res = vec![];
+    for p1 in matches1map {
+      'prev: for p2 in &matches2map {
+        if self.equality_between_substs && p1.1 != p2.1 {
+          continue;
+        }
+        let mut new_subst = p2.0.clone();
+        for v in self.searcher1.vars() {
+          if let Some(v_subst2_value) = p2.0.get(v) {
+            if *v_subst2_value != *p1.0.get(v).unwrap() {
+              continue 'prev;
+            } else {
             }
-            substs_new.push(new_subst_elem);
+          } else {
+            new_subst.insert(v, p1.0.get(v).unwrap().clone());
           }
         }
-        Some(SearchMatches {
-          eclass: eclass,
-          substs: substs_new,
+        res.push(SearchMatches {
+          eclass: p1.1,
+          substs: vec![new_subst],
           ast: None,
-        })
+        });
+        if res.len() == limit {
+          return res;
+        }
       }
     }
+    res
   }
 
   fn vars(&self) -> Vec<Var> {
     let mut x = self.searcher1.vars();
     x.extend(self.searcher2.vars());
+    x = Vec::from_iter(BTreeSet::from_iter(x.into_iter()).into_iter());
     x
   }
 }
@@ -460,8 +515,11 @@ where
   N: Analysis<L>,
 {
   fn check(&self, egraph: &EGraph<L, N>, eclass: Id, subst: &Subst) -> bool {
-    let id = egraph.lookup_expr(&self.str.parse().unwrap()).unwrap();
-    egraph.find(eclass) == egraph.find(id)
+    if let Some(id) = egraph.lookup_expr(&self.str.parse().unwrap()) {
+      egraph.find(eclass) == egraph.find(id)
+    } else {
+      false
+    }
   }
 }
 pub struct DestructiveApplier {
@@ -547,9 +605,10 @@ where
   }
 
   fn vars(&self) -> Vec<Var> {
-    let mut vars = egg::Applier::<SymbolLang, N>::vars(&self.applier1);
-    vars.extend(egg::Applier::<SymbolLang, N>::vars(&self.applier2));
-    vars
+    let mut x = self.applier1.vars();
+    x.extend(self.applier2.vars());
+    x = Vec::from_iter(BTreeSet::from_iter(x.into_iter()).into_iter());
+    x
   }
 }
 

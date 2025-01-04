@@ -3,9 +3,12 @@ use std::char;
 use std::collections::BTreeSet;
 use symbolic_expressions::*;
 
+use crate::analysis::CycleggAnalysis;
 use crate::ast::*;
 use crate::config::CONFIG;
-use crate::egraph::{ConditionalSearcher, DestructiveApplier, StrEquality};
+use crate::egraph::{
+  ConditionalSearcher, DestructiveApplier, DualApplier, DualSearcher, StrEquality,
+};
 use crate::goal::*;
 
 fn make_rewrite_for_defn<A>(

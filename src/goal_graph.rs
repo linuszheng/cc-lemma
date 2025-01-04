@@ -31,6 +31,14 @@ impl GoalInfo {
       size: sexp_size(&goal.full_expr.lhs) + sexp_size(&goal.full_expr.rhs),
     }
   }
+  pub fn new_implies(goal: &Goal, lemma_id: usize) -> Self {
+    GoalInfo {
+      name: goal.name.clone(),
+      lemma_id,
+      full_exp: goal.full_expr.to_string(),
+      size: sexp_size(&goal.full_expr.lhs) + sexp_size(&goal.full_expr.rhs) - 4,
+    }
+  }
 }
 
 impl PartialOrd for GoalInfo {

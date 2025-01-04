@@ -82,7 +82,14 @@
   (axiom nateq (Zero (Succ ?x)) False)
   (axiom nateq ((Succ ?x) Zero) False)
   (axiom nateq ((Succ ?x) (Succ ?y)) (nateq ?x ?y))
+  (:: lq (-> (Nat Nat) Bool))
+  (axiom lq (Zero (Succ ?x)) True)
+  (axiom lq (?x Zero) False)
+  (axiom lq ((Succ ?x) (Succ ?y)) (lq ?x ?y))
 
 
-  (=== optimize (inp0) (List) (main inp0) (mainNew inp0))
+  (=== optimize (inp0) (List) (main inp0) (mainNew inp0)
+  (
+    (<=> (lq ?a ?b) (geq ?b ?a))
+  ))
 )

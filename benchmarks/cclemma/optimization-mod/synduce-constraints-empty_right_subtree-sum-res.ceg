@@ -1,0 +1,40 @@
+we need
+(nateq (size x) 0)  implies  (nateq (allsum x) 0)
+
+assumption
+(nateq (size x) 0)
+
+we have VC
+F1 + a = a + (F1 + (allsum x))
+
+but we need to construct the expression
+(nateq (allsum x) 0)
+then we can do next
+F1 + a = a + F1
+or we can just encode the second one because we assume LIA
+
+since h1 is not h2
+
+lemma templates:
+a = b
+a => b
+(a = b) => (c = d)
+((size x) = zero) => ((allsum x) = 0)
+
+
+required lemmas:
+((size x) = zero) => ((allsum x) = 0)               IMPL
+(<=> (plus ?a ?b) (plus ?b ?a))                     LIA
+(=> (plus ?a (plus ?b ?c)) (plus (plus ?a ?b) ?c))  LIA
+(=> (tf7 ?a) ?a)                                    SMALL CC
+
+
+recursive / casewise definition:
+f Leaf = (size Leaf == zero) = true
+f Node a b = (size (Node a b) == zero) = false
+
+
+program equivalence?
+f1 x = f2 x 
+or just universal statements about programs?
+f x = true

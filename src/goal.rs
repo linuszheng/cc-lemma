@@ -1,10 +1,19 @@
 use crate::goal_graph::{GoalGraph, GoalInfo, GraphProveStatus};
+use async_openai::types::{
+  ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
+  CreateChatCompletionRequestArgs,
+};
+use async_openai::{config::OpenAIConfig, types::CreateCompletionRequestArgs, Client};
+use tokio;
+
 use colored::Colorize;
 use egg::*;
 use itertools::Itertools;
 use log::warn;
+use once_cell::sync::Lazy;
 use rand::prelude::*;
 use rand::{thread_rng, Rng};
+use std::any::Any;
 use std::collections::{BTreeMap, VecDeque};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Display;
@@ -13,14 +22,18 @@ use std::mem;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use symbolic_expressions::{parser, Sexp};
+use tokio::runtime::Runtime;
 
 use crate::analysis::{
-  cvecs_equal, print_cvec, CanonicalForm, CanonicalFormAnalysis, CycleggAnalysis,
+  cvecs_equal, print_cvec, CanonicalForm, CanonicalFormAnalysis, Cvec, CycleggAnalysis,
 };
 use crate::ast::*;
 use crate::config::*;
 use crate::egraph::*;
 use crate::utils::*;
+
+static RUNTIME: Lazy<Runtime> =
+  Lazy::new(|| Runtime::new().expect("Failed to create Tokio runtime"));
 
 // We will use SymbolLang for now
 pub type Eg = EGraph<SymbolLang, CycleggAnalysis>;
@@ -32,7 +45,9 @@ pub const LEMMA_PREFIX: &str = "lemma";
 pub const CC_LEMMA_PREFIX: &str = "cc-lemma";
 pub const IH_EQUALITY_PREFIX: &str = "ih-equality-"; // TODO: remove
 
-static mut IMPLIES_LEMMA_SEARCHED: bool = false;
+static mut IMPLIES_LEMMA_SEARCHED: usize = 0;
+pub const MAX_IMPLIES_LEMMA_SEARCHED: usize = 10;
+pub const MAX_IMPL_DEPTH: usize = 2;
 
 /// Condition that checks whether it is sound to apply a lemma
 #[derive(Clone)]
@@ -421,6 +436,9 @@ fn create_implies_equations(
 
   let a_vars = sexp_leaves(&a);
   let b_vars = sexp_leaves(&b);
+  if !(a_vars.is_subset(&b_vars) || b_vars.is_subset(&a_vars)) {
+    return vec![];
+  }
 
   let mut res = vec![];
   // A IMPLIES B
@@ -518,17 +536,22 @@ fn find_generalizations_impl_n(
         let fresh_name = format!("fresh_{}_{}", (fresh_var_starter), i);
         let var_symb = Symbol::new(&fresh_name);
         let generalized_var = Sexp::String(fresh_name.clone());
+
+        println!("fresh var made here: {}", fresh_name);
+
         let rhs_new_gen = substitute_sexp(&rhs_new, subexpr, &generalized_var);
         if rhs_new_gen == rhs_new {
           println!("the same ({}); continue", rhs_new_gen);
           continue;
         }
+        if sexp_is_constructor(&rhs_new_gen) {
+          println!("rhs trivial");
+          continue;
+        }
         let mut lhs_new_gen_maybe = None;
-        // if lhs is a constant then we only need to generalize one side
-        // watch out - generalizing 1
         if sexp_is_constructor(&lhs_new) {
-          println!("is constructor");
-          lhs_new_gen_maybe = Some(lhs_new.clone());
+          println!("lhs trivial");
+          continue;
         }
         // else we do what CCLemma already does
         else if lhs_nontrivial_subexprs.get(rhs_subexpr_str).is_some() {
@@ -562,9 +585,9 @@ fn find_generalizations_impl_n(
     });
     new_params.extend(var_map.clone());
     // Sexp::List(xs.to_owned())
-    println!("NEW IMPL LHS: {}", new_lhs);
-    println!("NEW IMPL RHS: {}", new_rhs);
-    println!("NEW PARAMS: {:?}", new_params.clone());
+    // println!("NEW IMPL LHS: {}", new_lhs);
+    // println!("NEW IMPL RHS: {}", new_rhs);
+    // println!("NEW PARAMS: {:?}", new_params.clone());
     let new_eqs = create_implies_equations(new_lhs, new_rhs, lhs_pat.clone(), rhs_pat.clone());
     let new_props = new_eqs
       .into_iter()
@@ -668,7 +691,7 @@ impl<A: Analysis<SymbolLang> + Clone> LemmaRewrite<A> {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum ScrutineeType {
   Guard,
   Var,
@@ -885,17 +908,9 @@ fn create_implies_rewrite_lt(
   } else {
     pattern_false.clone()
   };
-  println!(
-    "SEARCH FOR {}, IF {} = {}, THEN {} = {}",
-    rhs.clone(),
-    lhs.clone(),
-    cond_val.clone(),
-    rhs.clone(),
-    pattern_val.clone()
-  );
   if let Some(c) = cond {
     Rewrite::new(
-      format!("special1"),
+      format!("special12342234"),
       ConditionalSearcher {
         searcher: rhs,
         condition: c,
@@ -908,7 +923,7 @@ fn create_implies_rewrite_lt(
     .unwrap()
   } else {
     Rewrite::new(
-      format!("special1"),
+      format!("special1233"),
       rhs,
       ConditionalApplier {
         applier: pattern_val.clone(),
@@ -945,7 +960,7 @@ fn create_implies_rewrite_gt(
   );
   if let Some(c) = cond {
     Rewrite::new(
-      format!("special2"),
+      format!("special223423"),
       ConditionalSearcher {
         searcher: ConditionalSearcher {
           searcher: lhs.clone(),
@@ -958,7 +973,7 @@ fn create_implies_rewrite_gt(
     .unwrap()
   } else {
     Rewrite::new(
-      format!("special2"),
+      format!("special223434"),
       ConditionalSearcher {
         searcher: lhs.clone(),
         condition: StrEquality::new(cond_val.clone()),
@@ -980,8 +995,10 @@ fn create_implies_rewrite(
 ) -> Rw {
   if a_vars.is_subset(&b_vars) {
     create_implies_rewrite_lt(a_pat, lhs_val, b_pat, rhs_val, cond)
-  } else {
+  } else if b_vars.is_subset(&a_vars) {
     create_implies_rewrite_gt(a_pat, lhs_val, b_pat, rhs_val, cond)
+  } else {
+    panic!("vars on one side of implication must include the other");
   }
 }
 
@@ -1065,6 +1082,9 @@ impl<'a> Goal<'a> {
     // TODO: this could really also be a reference. Probably not necessary
     // for efficiency reason but yeah.
     res.egraph.analysis.cvec_analysis.reductions = global_search_state.cvec_reductions.clone();
+    for r in Goal::get_other_rules_cvec() {
+      res.egraph.analysis.cvec_analysis.reductions.push(r);
+    }
     for (name, ty) in &prop.params {
       res.add_scrutinee(*name, ty, 0);
       res.local_context.insert(*name, ty.clone());
@@ -1156,7 +1176,7 @@ impl<'a> Goal<'a> {
   //   }
   // }
 
-  pub fn is_implication(&mut self) -> bool {
+  pub fn is_implication(&self) -> bool {
     let sexp = &self.eq.rhs.sexp;
     println!("examining expr: {}", sexp);
     match sexp.clone() {
@@ -1167,6 +1187,7 @@ impl<'a> Goal<'a> {
         for n in 0..*ITE_MAX_N {
           let ite_str = format!("{}{}", *ITE, n);
           if f == Sexp::String(ite_str) {
+            println!("yes");
             return true;
           }
         }
@@ -1176,108 +1197,43 @@ impl<'a> Goal<'a> {
     }
   }
 
+  pub fn contains_ite(&mut self, expr: &RecExpr<SymbolLang>) -> bool {
+    println!("EXPR {}", expr);
+    for e in expr.as_ref() {
+      println!("CONTITE OP {}", e.op.as_str());
+      if e.op.as_str().starts_with(&*ITE) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// Saturate the goal by applying all available rewrites
   pub fn saturate(&mut self, top_lemmas: &BTreeMap<String, Rw>) {
     // RIPPLE-VERIFY
-    let mut temp_lemmas = vec![];
     // LHS-VARS < RHS-VARS
-    self.egraph.add(SymbolLang::leaf(TRUE.clone()));
-    self.egraph.add(SymbolLang::leaf(FALSE.clone()));
-    let lem1 = {
-      let ite0 = format!("{}{}", *ITE, 0);
-      let lhs: Pattern<SymbolLang> = format!("({} ?a ?c {})", ite0, *TRUE).parse().unwrap();
-      let rhs: Pattern<SymbolLang> = format!("({} ({} ?a ?b) ?c {})", ite0, *AND, *TRUE)
-        .parse()
-        .unwrap();
-      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
-      Rewrite::new(
-        format!("special1"),
-        rhs,
-        ConditionalApplier {
-          applier: pattern_true.clone(),
-          condition: ConditionEqual::new(lhs, pattern_true),
-        },
-      )
-      .unwrap()
-    };
-    // LHS-VARS > RHS-VARS
-    let lem2 = {
-      let and = format!("{}", *AND);
-      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", and).parse().unwrap();
-      let rhs: Pattern<SymbolLang> = format!("?a").parse().unwrap();
-      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
-      Rewrite::new(
-        format!("special2"),
-        ConditionalSearcher {
-          searcher: lhs.clone(),
-          condition: StrEquality::new(TRUE.clone()),
-        },
-        DualApplier::new(rhs, pattern_true.clone()),
-      )
-      .unwrap()
-    };
-    let lem3 = {
-      let and = format!("{}", *AND);
-      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", and).parse().unwrap();
-      let rhs: Pattern<SymbolLang> = format!("?b").parse().unwrap();
-      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
-      Rewrite::new(
-        format!("special3"),
-        ConditionalSearcher {
-          searcher: lhs.clone(),
-          condition: StrEquality::new(TRUE.clone()),
-        },
-        DualApplier::new(rhs, pattern_true.clone()),
-      )
-      .unwrap()
-    };
-    let lem4 = {
-      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", *NATEQ).parse().unwrap();
-      let rhs1: Pattern<SymbolLang> = format!("?a").parse().unwrap();
-      let rhs2: Pattern<SymbolLang> = format!("?b").parse().unwrap();
-      Rewrite::new(
-        format!("special4"),
-        ConditionalSearcher {
-          searcher: lhs.clone(),
-          condition: StrEquality::new(TRUE.clone()),
-        },
-        DualApplier::new(rhs1, rhs2),
-      )
-      .unwrap()
-    };
-    let lem5 = {
-      let lhs1: Pattern<SymbolLang> = format!("({} ?a)", *NOT).parse().unwrap();
-      let lhs2: Pattern<SymbolLang> = format!("({} ?b)", *NOT).parse().unwrap();
-      let rhs1: Pattern<SymbolLang> = format!("?a").parse().unwrap();
-      let rhs2: Pattern<SymbolLang> = format!("?b").parse().unwrap();
-      Rewrite::new(
-        format!("special5"),
-        DualSearcher {
-          searcher1: lhs1,
-          searcher2: lhs2,
-        },
-        DualApplier::new(rhs1, rhs2),
-      )
-      .unwrap()
-    };
-    temp_lemmas.push(&lem1);
-    temp_lemmas.push(&lem2);
-    temp_lemmas.push(&lem3);
-    temp_lemmas.push(&lem4);
-    temp_lemmas.push(&lem5);
-    println!("SELF LEMMAS: {:?}", self.lemmas.values());
-    println!("TOP LEMMAS: {:?}", top_lemmas.values());
-    println!("TEMP LEMMAS: {:?}", temp_lemmas);
+    let temp = Goal::get_other_rules();
+    let t = self.egraph.add(SymbolLang::leaf(TRUE.clone()));
+    let f = self.egraph.add(SymbolLang::leaf(FALSE.clone()));
+    let not_f = self.egraph.add_expr(
+      &RecExpr::from_str(format!("({} {})", NOT.clone(), FALSE.clone()).as_str()).unwrap(),
+    );
+    let not_t = self.egraph.add_expr(
+      &RecExpr::from_str(format!("({} {})", NOT.clone(), TRUE.clone()).as_str()).unwrap(),
+    );
+    self.egraph.union(t, not_f);
+    self.egraph.union(f, not_t);
     let rewrites: Vec<_> = self
       .global_search_state
       .reductions
       .iter()
       .chain(self.lemmas.values())
       .chain(top_lemmas.values())
-      .chain(temp_lemmas)
+      .chain(temp.iter())
       .collect();
     let lhs_id = self.eq.lhs.id;
     let rhs_id = self.eq.rhs.id;
+    println!("BEFORE RUNNER");
     let runner = Runner::default()
       .with_explanations_enabled()
       .with_egraph(self.egraph.to_owned())
@@ -1291,6 +1247,7 @@ impl<'a> Goal<'a> {
       })
       .run(rewrites);
     self.egraph = runner.egraph;
+    println!("AFTER RUNNER");
   }
 
   /// Look to see if we have proven the goal somehow. Note that this does not
@@ -1402,6 +1359,7 @@ impl<'a> Goal<'a> {
     lemma_number: usize,
     exclude_wildcards: bool,
   ) -> Option<LemmaRewrite<CycleggAnalysis>> {
+    println!("make lemma (IH) rewrite");
     let is_var = |v| self.local_context.contains_key(v);
 
     // NOTE: (CK) Before we would not recreate the lhs from lhs_expr every time
@@ -1433,10 +1391,23 @@ impl<'a> Goal<'a> {
 
     let lhs_vars = var_set(&lhs);
     let rhs_vars = var_set(&rhs);
-    // println!("lhs vars: {:?}", lhs_vars);
-    // println!("rhs vars: {:?}", rhs_vars);
-    let lemma_vars = lhs_vars.union(&rhs_vars).cloned().collect();
-    // println!("trying to make lemma rewrite forall {:?}. {} = {}", lemma_vars, lhs, rhs);
+    println!("lhs vars: {:?}", lhs_vars);
+    println!("rhs vars: {:?}", rhs_vars);
+    let lemma_vars: BTreeSet<Var> = lhs_vars.union(&rhs_vars).cloned().collect();
+    // for v in lemma_vars.iter() {
+    //   let res = self
+    //     .local_context
+    //     .get(&Symbol::from_str(v.to_string().as_str().get(1..).unwrap()).unwrap())
+    //     .unwrap();
+    //   println!("res (type): {}", res);
+    //   if res.eq(&Type::from_str(&mangle_name("Zipper")).unwrap()) {
+    //     println!("Zipper found");
+    //   }
+    // }
+    println!(
+      "trying to make lemma rewrite forall {:?}. {} = {}",
+      lemma_vars, lhs, rhs
+    );
 
     // If any of my premises contain variables that are not present in lhs or rhs,
     // skip because we don't know how to check such a premise
@@ -1461,6 +1432,8 @@ impl<'a> Goal<'a> {
       .keys()
       .map(|var| (*var, self.local_context.get(var).unwrap().clone()))
       .collect();
+
+    println!("lemma var classes: {:?}", lemma_var_classes);
 
     let mut condition = SoundnessWithType {
       soundness: Some(Soundness {
@@ -1533,6 +1506,8 @@ impl<'a> Goal<'a> {
   ) -> Option<LemmaRewrite<CycleggAnalysis>> {
     let is_var = |v| self.local_context.contains_key(v);
     println!("INSIDE MLRI");
+    println!("LHS EXPR: {}", lhs_expr);
+    println!("RHS EXPR: {}", rhs_expr);
     // NOTE: (CK) Before we would not recreate the lhs from lhs_expr every time
     // we made a lemma rewrite since we did nested for loops
     //
@@ -1957,9 +1932,10 @@ impl<'a> Goal<'a> {
     // Special case: the first time we add lemmas (i.e. when there are no
     // previous lemmas), we will make lemma rewrites out of the lhs and rhs only
     // and we will use the special IH name.
-    if self.lemmas.is_empty() {
-      let mut rewrites = self.lemmas.clone();
-      if let Some(rw) = &self.implies_rw {
+    let mut rewrites = self.lemmas.clone();
+    let add_extra_lemmas = true;
+    if self.lemmas.is_empty() || add_extra_lemmas {
+      if let Some(_) = &self.implies_rw {
         let lemma_rw = self.make_lemma_rewrite_implies(
           &self.eq.lhs.expr,
           &self.eq.rhs.expr,
@@ -1967,35 +1943,35 @@ impl<'a> Goal<'a> {
           ih_lemma_number,
           false,
         );
-        lemma_rw.unwrap().add_to_rewrites(&mut rewrites);
+        if let Some(lemma_rw) = lemma_rw {
+          lemma_rw.add_to_rewrites(&mut rewrites);
+        }
       } else {
         let premises = self.update_premises();
-        // In the non-cyclic case, only use the original LHS and RHS
-        // and only if no other lemmas have been added yet
+
+        // RIPPLE-VERIFY: this rewrite allows for induction on any inner type
+        // before: it only added at the top level, before case splits
+        // however, sometimes we want to induct on an inner type,
+        // so now we add the case-split IH lemma at each level
         let lemma_rw = self.make_lemma_rewrite(
-          &self.eq.lhs.expr,
-          &self.eq.rhs.expr,
+          &RecExpr::from_str(&self.full_expr.lhs.to_string()).unwrap(),
+          &RecExpr::from_str(&self.full_expr.rhs.to_string()).unwrap(),
           &premises,
           ih_lemma_number,
           false,
         );
-        if lemma_rw.is_none() {
-          println!(
-            "{}: {} == {}. params: {:?}",
-            self.name, self.eq.lhs.sexp, self.eq.rhs.sexp, self.top_level_params
-          );
-          panic!()
+        if let Some(l) = lemma_rw {
+          l.add_to_rewrites(&mut rewrites);
         }
-        lemma_rw.unwrap().add_to_rewrites(&mut rewrites);
       }
-      return rewrites;
     }
+    return rewrites;
     // Otherwise, we only create lemmas when we are operating in the cyclic mode
-    if CONFIG.is_cyclic() {
-      self.make_cyclic_lemma_rewrites(timer, lemmas_state, true).0
-    } else {
-      self.lemmas.clone()
-    }
+    // if CONFIG.is_cyclic() {
+    //   self.make_cyclic_lemma_rewrites(timer, lemmas_state, true).0
+    // } else {
+    //   self.lemmas.clone()
+    // }
   }
 
   /// Creates cyclic lemmas from the current goal.
@@ -2081,20 +2057,43 @@ impl<'a> Goal<'a> {
       }
     }
   }
+  fn apply_pat<L: Language, A: Analysis<L>>(
+    ids: &mut [Id],
+    pat: &[ENodeOrVar<L>],
+    egraph: &mut EGraph<L, A>,
+    subst: &Subst,
+  ) -> Id {
+    debug_assert_eq!(pat.len(), ids.len());
+
+    for (i, pat_node) in pat.iter().enumerate() {
+      let id = match pat_node {
+        ENodeOrVar::Var(w) => subst[*w],
+        ENodeOrVar::ENode(e) => {
+          let n = e.clone().map_children(|child| ids[usize::from(child)]);
+          egraph.add(n)
+        }
+      };
+      ids[i] = id;
+    }
+
+    *ids.last().unwrap()
+  }
 
   /// If the egraph contains ITEs whose condition is "irreducible"
   /// (i.e. not equivalent to a constant or a scrutinee variable),
   /// add a fresh scrutinee to its eclass, so that we can match on it.
   fn split_ite(&mut self) {
+    println!("split ite");
     let guard_var = "?g".parse().unwrap();
     // Pattern "(ite ?g ?x ?y)"
     // Collects class IDs of all stuck guards;
     // it's a map because the same guard can match more than once, but we only want to add a new scrutinee once
     let mut stuck_guards = BTreeMap::new();
+    let mut top_level_guards = BTreeSet::new();
     // RIPPLE-VERIFY-TODO: generalize this to any i that is in the benchmark
     // RIPPLE-VERIFY-CONFIG
     // for i in vec![0] {
-    for i in vec![0, 1, 2, 3, 4] {
+    for i in vec![0, 1, 2, 3, 4, 5] {
       let searcher: Pattern<SymbolLang> =
         format!("({} {} ?x ?y)", format!("{}{}", *ITE, i), guard_var)
           .parse()
@@ -2105,6 +2104,21 @@ impl<'a> Goal<'a> {
           let guard_id = *subst.get(guard_var).unwrap();
           if let CanonicalForm::Stuck(_) = self.egraph[guard_id].data.canonical_form_data {
             stuck_guards.insert(guard_id, subst);
+            // if (m.eclass == self.egraph.find(self.eq.lhs.id)
+            //   || m.eclass == self.egraph.find(self.eq.rhs.id))
+            //   && (m.eclass
+            //     != self
+            //       .egraph
+            //       .lookup_expr(&RecExpr::from_str((*TRUE).as_str()).unwrap())
+            //       .unwrap())
+            // {
+            println!("insert top level");
+            println!("{}", self.egraph.id_to_expr(guard_id).to_string());
+            top_level_guards.insert(guard_id);
+            // } else {
+            //   println!("not top level");
+            //   println!("{}", self.egraph.id_to_expr(guard_id).to_string());
+            // }
           }
         }
       }
@@ -2122,7 +2136,13 @@ impl<'a> Goal<'a> {
         .insert(fresh_var, BOOL_TYPE.parse().unwrap());
       // We are adding the new scrutinee to the front of the deque,
       // because we want to split conditions first, since they don't introduce new variables
-      self.scrutinees.push_front(Scrutinee::new_guard(fresh_var));
+      if top_level_guards.contains(&guard_id) {
+        let mut ng: Scrutinee = Scrutinee::new_guard(fresh_var);
+        ng.depth = 1;
+        self.scrutinees.push_front(ng);
+      } else {
+        self.scrutinees.push_front(Scrutinee::new_guard(fresh_var));
+      }
       let new_node = SymbolLang::leaf(fresh_var);
       let new_pattern_ast = vec![ENodeOrVar::ENode(new_node.clone())].into();
       let guard_var_pattern_ast = vec![ENodeOrVar::Var(guard_var)].into();
@@ -2145,6 +2165,7 @@ impl<'a> Goal<'a> {
     timer: &Timer,
     lemmas_state: &mut LemmasState,
     ih_lemma_number: usize,
+    remove_old_var: bool,
   ) -> (ProofTerm, Vec<Goal<'a>>) {
     let new_lemmas = self.add_lemma_rewrites(timer, lemmas_state, ih_lemma_number);
 
@@ -2249,7 +2270,9 @@ impl<'a> Goal<'a> {
         format!("case-split:{}", new_goal.name),
       );
       // Remove old variable from the egraph and context
-      remove_node(&mut new_goal.egraph, &var_node);
+      if remove_old_var {
+        remove_node(&mut new_goal.egraph, &var_node);
+      }
 
       new_goal.egraph.rebuild();
 
@@ -2296,59 +2319,60 @@ impl<'a> Goal<'a> {
     self.compute_descendents(self.eq.rhs.id, &mut rhs_descendents);
 
     for reduction in self.global_search_state.reductions {
-      let x = reduction.searcher.get_pattern_ast().unwrap();
-      let sexp = symbolic_expressions::parser::parse_str(&x.to_string()).unwrap();
+      if let Some(x) = reduction.searcher.get_pattern_ast() {
+        let sexp = symbolic_expressions::parser::parse_str(&x.to_string()).unwrap();
 
-      // Hack to dedup the new patterns (sexps) we generated
-      let mut new_sexps: Vec<Sexp> = Goal::analyze_sexp_for_blocking_vars(&sexp)
-        .into_iter()
-        .map(|x| x.to_string())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(|x| symbolic_expressions::parser::parse_str(x.as_str()).unwrap())
-        .collect();
-
-      // the patterns we generated contained only ? instead of ?var, so we go and add fresh variable names everywhere
-      for ns in new_sexps.iter_mut() {
-        *ns = Goal::gen_fresh_vars(ns.clone(), 1);
-      }
-
-      // use these patterns to search over the egraph
-      for new_sexp in new_sexps {
-        if timer.timeout() {
-          return (blocking_vars, blocking_exprs);
-        }
-        let mod_searcher: Pattern<SymbolLang> = new_sexp.to_string().parse().unwrap();
-
-        // for each new pattern, find the pattern variables in blocking positions so that we can use them to look up the substs later
-        let bvs: Vec<Var> = mod_searcher
-          .vars()
-          .iter()
-          .filter(|&x| x.to_string().contains("block_"))
-          .cloned()
+        // Hack to dedup the new patterns (sexps) we generated
+        let mut new_sexps: Vec<Sexp> = Goal::analyze_sexp_for_blocking_vars(&sexp)
+          .into_iter()
+          .map(|x| x.to_string())
+          .collect::<BTreeSet<_>>()
+          .into_iter()
+          .map(|x| symbolic_expressions::parser::parse_str(x.as_str()).unwrap())
           .collect();
 
-        let matches = mod_searcher.search(&self.egraph);
+        // the patterns we generated contained only ? instead of ?var, so we go and add fresh variable names everywhere
+        for ns in new_sexps.iter_mut() {
+          *ns = Goal::gen_fresh_vars(ns.clone(), 1);
+        }
 
-        // let extractor = Extractor::new(&self.egraph, AstSize);
+        // use these patterns to search over the egraph
+        for new_sexp in new_sexps {
+          if timer.timeout() {
+            return (blocking_vars, blocking_exprs);
+          }
+          let mod_searcher: Pattern<SymbolLang> = new_sexp.to_string().parse().unwrap();
 
-        // look at the e-class analysis for each matched e-class, if any of them has a variable, use it
-        for m in matches {
-          for subst in m.substs {
-            for v in &bvs[0..] {
-              if let Some(&ecid) = subst.get(*v) {
-                match &self.egraph[ecid].data.canonical_form_data {
-                  CanonicalForm::Var(n) => {
-                    blocking_vars.insert(n.op);
-                  }
-                  CanonicalForm::Stuck(_) | CanonicalForm::Const(_) => {
-                    if lhs_descendents.contains(&ecid) && rhs_descendents.contains(&ecid) {
-                      blocking_exprs.insert(ecid);
-                      // let expr = extractor.find_best(ecid).1;
-                      // blocking_exprs.insert(expr.to_string());
+          // for each new pattern, find the pattern variables in blocking positions so that we can use them to look up the substs later
+          let bvs: Vec<Var> = mod_searcher
+            .vars()
+            .iter()
+            .filter(|&x| x.to_string().contains("block_"))
+            .cloned()
+            .collect();
+
+          let matches = mod_searcher.search(&self.egraph);
+
+          // let extractor = Extractor::new(&self.egraph, AstSize);
+
+          // look at the e-class analysis for each matched e-class, if any of them has a variable, use it
+          for m in matches {
+            for subst in m.substs {
+              for v in &bvs[0..] {
+                if let Some(&ecid) = subst.get(*v) {
+                  match &self.egraph[ecid].data.canonical_form_data {
+                    CanonicalForm::Var(n) => {
+                      blocking_vars.insert(n.op);
                     }
+                    CanonicalForm::Stuck(_) | CanonicalForm::Const(_) => {
+                      if lhs_descendents.contains(&ecid) && rhs_descendents.contains(&ecid) {
+                        blocking_exprs.insert(ecid);
+                        // let expr = extractor.find_best(ecid).1;
+                        // blocking_exprs.insert(expr.to_string());
+                      }
+                    }
+                    _ => (),
                   }
-                  _ => (),
                 }
               }
             }
@@ -2687,8 +2711,13 @@ impl<'a> Goal<'a> {
   }
 
   fn is_bool(&mut self, id: &&Id) -> bool {
+    println!(
+      "is bool? {}",
+      self.egraph[**id].data.canonical_form_data.get_enode()
+    );
     let class_op = self.egraph[**id].data.canonical_form_data.get_enode().op;
     if class_op == "$".into() {
+      println!("no");
       false
     } else {
       // RIPPLE-VERIFY-TODO: debug when this fails
@@ -2699,8 +2728,18 @@ impl<'a> Goal<'a> {
         .or_else(|| self.local_context.get(&class_op));
       if let Some(r) = res {
         let (args_ty, class_ty) = r.args_ret();
-        !(args_ty.iter().all(|x| x.to_string() == *BOOL_TYPE)) && class_ty.to_string() == *BOOL_TYPE
+        if args_ty.is_empty() {
+          let res = class_ty.to_string() == *BOOL_TYPE;
+          println!("{}", res);
+          res
+        } else {
+          let res = !(args_ty.iter().all(|x| x.to_string() == *BOOL_TYPE))
+            && class_ty.to_string() == *BOOL_TYPE;
+          println!("{}", res);
+          res
+        }
       } else {
+        println!("no");
         false
       }
     }
@@ -2708,7 +2747,10 @@ impl<'a> Goal<'a> {
 
   fn is_interesting(&mut self, expr: RecExpr<SymbolLang>) -> bool {
     let op2 = expr.as_ref().last().unwrap();
-    (op2.op.as_str() != *AND && op2.op.as_str() != *OR && op2.op.as_str() != *NOT)
+    (op2.op.as_str() != *AND
+      && op2.op.as_str() != *OR
+      && op2.op.as_str() != *NOT
+      && !op2.op.as_str().starts_with(&*ITE))
       && !self.is_reducible(&expr)
       && expr.as_ref().len() > 1
   }
@@ -2749,6 +2791,7 @@ impl<'a> Goal<'a> {
           }
         })
         .collect();
+      let SIZE_LIM = 8;
       let exprs_lhs_temp = get_all_expressions_with_loop(&self.egraph, bool_expr_ids);
       let exprs_lhs: Vec<(&Id, Vec<&RecExpr<SymbolLang>>)> = exprs_lhs_temp
         .iter()
@@ -2757,13 +2800,15 @@ impl<'a> Goal<'a> {
             id,
             (*vec)
               .iter()
-              .filter(|expr| self.is_interesting((*expr).clone()))
+              .filter(|expr| {
+                self.is_interesting((*expr).clone()) && expr.as_ref().len() <= SIZE_LIM
+              })
               .collect(),
           )
         })
         .collect();
       let exprs_rhs = exprs_lhs.clone();
-      for (lhs_id, lhs_reclist) in exprs_lhs {
+      for (lhs_id, lhs_reclist) in exprs_lhs.clone() {
         for (rhs_id, rhs_reclist) in exprs_rhs.clone() {
           // we do both sides of implication later - better because we can do generalization step once for all combos
           // TODO ^
@@ -2772,10 +2817,7 @@ impl<'a> Goal<'a> {
           }
           for lhs_rec in lhs_reclist.clone() {
             for rhs_rec in rhs_reclist.clone() {
-              if *lhs_rec != *rhs_rec {
-                println!("construct implication: {} ?? {}", lhs_rec, rhs_rec);
-                lemmas.extend(self.construct_implication_all_gen(prop, lhs_rec, rhs_rec));
-              }
+              lemmas.extend(self.construct_implication_all_gen(prop, &lhs_rec, rhs_rec));
             }
           }
         }
@@ -2784,19 +2826,162 @@ impl<'a> Goal<'a> {
     lemmas
   }
 
+  // fn search_for_implies_lemmas_on_implies_goal(
+  //   &mut self,
+  //   prop: &Prop,
+  //   timer: &Timer,
+  //   lemmas_state: &mut LemmasState,
+  // ) -> Vec<(Prop, Rewrite<SymbolLang, CycleggAnalysis>)> {
+  //   println!("search for implies in implies");
+  //   let mut lemmas = vec![];
+  //   self.egraph.analysis.cvec_analysis.saturate();
+  //   let entire_implies = prop.eq.rhs.clone();
+  //   let exprs = entire_implies.clone().take_list().unwrap();
+  //   let implies_symbol = &exprs[0];
+  //   let lhs = &exprs[1];
+  //   let rhs = &exprs[2];
+  //   let rhs_id = self
+  //     .egraph
+  //     .lookup_expr(&RecExpr::<SymbolLang>::from_str(rhs.to_string().as_str()).unwrap())
+  //     .unwrap();
+  //   let true_id = self
+  //     .egraph
+  //     .lookup_expr(&RecExpr::<SymbolLang>::from_str(TRUE.as_str()).unwrap())
+  //     .unwrap();
+  //   println!(
+  //     "searching in rhs(goal) {}",
+  //     &RecExpr::<SymbolLang>::from_str(rhs.to_string().as_str()).unwrap()
+  //   );
+
+  //   let class_ids: Vec<Id> = self.egraph.classes().map(|c| c.id).collect();
+  //   let _true_id = self.egraph.add(SymbolLang::leaf(TRUE.clone()));
+  //   let _false_id = self.egraph.add(SymbolLang::leaf(FALSE.clone()));
+  //   self.build_cvecs();
+  //   let bool_expr_ids: Vec<Id> = class_ids
+  //     .iter()
+  //     .filter_map(|id| {
+  //       if self.is_bool(&id) {
+  //         Some(self.egraph.find(*id))
+  //       } else {
+  //         None
+  //       }
+  //     })
+  //     .collect();
+  //   // let exprs_rhs_temp = get_all_expressions_with_loop(&self.egraph, vec![rhs_id]);
+  //   let exprs_rhs_temp = get_all_expressions_with_loop(&self.egraph, bool_expr_ids.clone());
+  //   let exprs_rhs: Vec<(&Id, Vec<&RecExpr<SymbolLang>>)> = exprs_rhs_temp
+  //     .iter()
+  //     .map(|(id, vec)| {
+  //       (
+  //         id,
+  //         (*vec)
+  //           .iter()
+  //           .filter(|expr| self.is_interesting((*expr).clone()) && !self.contains_ite(*expr))
+  //           .collect(),
+  //       )
+  //     })
+  //     .collect();
+  //   // let exprs_lhs_temp = get_all_expressions_with_loop(&self.egraph, vec![true_id]);
+  //   // let exprs_lhs: Vec<(&Id, Vec<&RecExpr<SymbolLang>>)> = exprs_lhs_temp
+  //   //   .iter()
+  //   //   .map(|(id, vec)| {
+  //   //     (
+  //   //       id,
+  //   //       (*vec)
+  //   //         .iter()
+  //   //         .filter(|expr: &&RecExpr<SymbolLang>| self.is_interesting((*expr).clone()))
+  //   //         .collect(),
+  //   //     )
+  //   //   })
+  //   //   .collect();
+  //   for expr in exprs_rhs.clone() {
+  //     for e in expr.1 {
+  //       println!("tester {}", e);
+  //     }
+  //   }
+  //   for id in class_ids.clone() {
+  //     println!("tester before filter {}", self.egraph.id_to_expr(id));
+  //   }
+  //   for id in bool_expr_ids.clone() {
+  //     println!("tester before filter 2 {}", self.egraph.id_to_expr(id));
+  //   }
+  //   let exprs_lhs = exprs_rhs.clone();
+  //   for (lhs_id1, lhs_reclist1) in exprs_lhs.clone() {
+  //     for (lhs_id2, lhs_reclist2) in exprs_lhs.clone() {
+  //       for (rhs_id, rhs_reclist) in exprs_rhs.clone() {
+  //         let c1_res: Vec<bool> =
+  //           if let Cvec::Cvec(c1) = self.egraph[*lhs_id1].data.cvec_data.clone() {
+  //             Some(c1)
+  //           } else {
+  //             None
+  //           }
+  //           .unwrap()
+  //           .iter()
+  //           .map(|id| *id == true_id)
+  //           .collect();
+  //         let c2_res: Vec<bool> =
+  //           if let Cvec::Cvec(c1) = self.egraph[*lhs_id1].data.cvec_data.clone() {
+  //             Some(c1)
+  //           } else {
+  //             None
+  //           }
+  //           .unwrap()
+  //           .iter()
+  //           .map(|id| *id == true_id)
+  //           .collect();
+  //         let c3_res: Vec<bool> =
+  //           if let Cvec::Cvec(c1) = self.egraph[*lhs_id1].data.cvec_data.clone() {
+  //             Some(c1)
+  //           } else {
+  //             None
+  //           }
+  //           .unwrap()
+  //           .iter()
+  //           .map(|id| *id == true_id)
+  //           .collect();
+  //         if !zip(zip(c1_res.iter(), c2_res.iter()), c3_res.iter())
+  //           .all(|((a, b), c)| (!(*a && *b)) || *c)
+  //         {
+  //           continue;
+  //         }
+  //         for lhs_rec1 in lhs_reclist1.clone() {
+  //           for lhs_rec2 in lhs_reclist2.clone() {
+  //             if lhs_rec1 == lhs_rec2 {
+  //               continue;
+  //             }
+  //             for rhs_rec in rhs_reclist.clone() {
+  //               if rhs_rec == lhs_rec2 || rhs_rec == lhs_rec1 {
+  //                 continue;
+  //               }
+  //               let lhs_comb = SymbolLang::new(AND.clone(), vec![Id::from(0), Id::from(1)])
+  //                 .join_recexprs(|x| if x == Id::from(0) { lhs_rec1 } else { lhs_rec2 });
+  //               println!("LHS: {}", lhs_comb);
+  //               println!("RHS: {}", rhs_rec);
+  //               lemmas.extend(self.construct_implication_all_gen(prop, &lhs_comb, rhs_rec));
+  //             }
+  //           }
+  //         }
+  //       }
+  //     }
+  //   }
+  //   lemmas
+  // }
+
   fn search_for_cc_lemmas(&mut self, timer: &Timer, lemmas_state: &mut LemmasState) -> Vec<Prop> {
     // RIPPLE-VERIFY-CONFIG {
-    let FILTER_BY_SEMANTIC_DECOMP = false;
+    let FILTER_BY_SEMANTIC_DECOMP = true;
     let ADD_OUTER_BY_SEMANTIC_DECOMP = false;
     let RELAX_FILTER_FOR_WAVE_RULES = false;
     let RELAX_FILTER_FOR_FERT = true;
+    let ELIM_FERT = false;
     let ADD_PREMISE_IMPLICATIONS = true;
-    let TURN_CC_LEMMAS_OFF = true;
+    let mut TURN_CC_LEMMAS_OFF = false;
     // } RIPPLE-VERIFY-CONFIG
     let mut lemmas = vec![];
     self.egraph.analysis.cvec_analysis.saturate();
     let resolved_lhs_id = self.egraph.find(self.eq.lhs.id);
     let resolved_rhs_id = self.egraph.find(self.eq.rhs.id);
+    println!("search for cc lemmas");
     if CONFIG.verbose {
       println!("lhs: ");
       print_expressions_in_eclass(&self.egraph, resolved_lhs_id);
@@ -2843,78 +3028,92 @@ impl<'a> Goal<'a> {
             let need_to_create_outer_exprs =
               FILTER_BY_SEMANTIC_DECOMP || ADD_OUTER_BY_SEMANTIC_DECOMP;
             let mut should_add_inner = false;
-            if need_to_create_outer_exprs {
-              let fresh_var = format!("fresh_{}_{}", self.name, self.egraph.total_size());
-              let fresh_symb = Symbol::from(&fresh_var);
-              let class_op = self.egraph[class_1_id]
-                .data
-                .canonical_form_data
-                .get_enode()
-                .op;
-              let (_, class_ty) = self
-                .global_search_state
-                .context
-                .get(&class_op)
-                .or_else(|| self.local_context.get(&class_op))
-                .unwrap()
-                .args_ret();
-              self.local_context.insert(fresh_symb, class_ty); // RIPPLE-VERIFY-TODO
-              let lhs_expr_outer = self.extract_generalized_expr_two(
-                class_1_id,
-                class_2_id,
-                fresh_symb,
-                resolved_lhs_id,
-              );
-              let lhs_id_outer = self.egraph.add_expr(&lhs_expr_outer);
-              let rhs_expr_outer = self.extract_generalized_expr_two(
-                class_1_id,
-                class_2_id,
-                fresh_symb,
-                resolved_rhs_id,
-              );
-              let rhs_id_outer = self.egraph.add_expr(&rhs_expr_outer);
-              self.egraph.analysis.cvec_analysis.saturate();
-              let should_add_outer = {
-                cvecs_equal(
-                  &self.egraph.analysis.cvec_analysis,
-                  &self.egraph[lhs_id_outer].data.cvec_data,
-                  &self.egraph[rhs_id_outer].data.cvec_data,
-                ) == Some(true)
-              };
-              if ADD_OUTER_BY_SEMANTIC_DECOMP {
-                if should_add_outer {
-                  println!("add outer decomp");
-                  if self.add_lemma(
-                    timer,
-                    lemmas_state,
-                    &mut lemmas,
-                    lhs_id_outer,
-                    rhs_id_outer,
-                    resolved_lhs_id,
-                    resolved_rhs_id,
-                  ) {
-                    return lemmas;
-                  }
-                }
-              }
-              if FILTER_BY_SEMANTIC_DECOMP {
-                should_add_inner |= should_add_outer;
-              }
-            }
+            // should_add_inner = true;
+            // if need_to_create_outer_exprs {
+            //   let fresh_var = format!("fresh_{}_{}", self.name, self.egraph.total_size());
+            //   println!("fresh var made in cc lemma search: {}", fresh_var);
+            //   let fresh_symb = Symbol::from(&fresh_var);
+            //   let class_op = self.egraph[class_1_id]
+            //     .data
+            //     .canonical_form_data
+            //     .get_enode()
+            //     .op;
+            //   let (_, class_ty) = self
+            //     .global_search_state
+            //     .context
+            //     .get(&class_op)
+            //     .or_else(|| self.local_context.get(&class_op))
+            //     .unwrap()
+            //     .args_ret();
+            //   self.local_context.insert(fresh_symb, class_ty); // RIPPLE-VERIFY-TODO
+            //   let lhs_expr_outer = self.extract_generalized_expr_two(
+            //     class_1_id,
+            //     class_2_id,
+            //     fresh_symb,
+            //     resolved_lhs_id,
+            //   );
+            //   let lhs_id_outer = self.egraph.add_expr(&lhs_expr_outer);
+            //   let rhs_expr_outer = self.extract_generalized_expr_two(
+            //     class_1_id,
+            //     class_2_id,
+            //     fresh_symb,
+            //     resolved_rhs_id,
+            //   );
+            //   let rhs_id_outer = self.egraph.add_expr(&rhs_expr_outer);
+            //   self.egraph.analysis.cvec_analysis.saturate();
+            //   let should_add_outer = {
+            //     cvecs_equal(
+            //       &self.egraph.analysis.cvec_analysis,
+            //       &self.egraph[lhs_id_outer].data.cvec_data,
+            //       &self.egraph[rhs_id_outer].data.cvec_data,
+            //     ) == Some(true)
+            //   };
+            //   if ADD_OUTER_BY_SEMANTIC_DECOMP {
+            //     if should_add_outer {
+            //       println!("add outer decomp");
+            //       if self.add_lemma(
+            //         timer,
+            //         lemmas_state,
+            //         &mut lemmas,
+            //         lhs_id_outer,
+            //         rhs_id_outer,
+            //         resolved_lhs_id,
+            //         resolved_rhs_id,
+            //       ) {
+            //         return lemmas;
+            //       }
+            // }
+            // }
+
+            //   println!("passed cvecs");
+            //   if FILTER_BY_SEMANTIC_DECOMP {
+            //     should_add_inner |= should_add_outer;
+            //     if should_add_outer {
+            //       println!("semantic decomp ok");
+            //     }
+            //   }
+            // }
             if !TURN_CC_LEMMAS_OFF && !FILTER_BY_SEMANTIC_DECOMP {
               should_add_inner |= true;
             }
-            if RELAX_FILTER_FOR_WAVE_RULES {
-              let is_ripple_rule = self.check_if_ripple_rule(class_1_id, class_2_id); // RIPPLE-VERIFY-TODO
-              should_add_inner |= is_ripple_rule;
-            }
+            // if RELAX_FILTER_FOR_WAVE_RULES {
+            //   let is_ripple_rule = self.check_if_ripple_rule(class_1_id, class_2_id); // RIPPLE-VERIFY-TODO
+            //   should_add_inner |= is_ripple_rule;
+            // }
             if RELAX_FILTER_FOR_FERT {
               let is_lhs_rhs = (class_1_id == resolved_lhs_id && class_2_id == resolved_rhs_id)
                 || (class_1_id == resolved_rhs_id && class_2_id == resolved_lhs_id);
+              if is_lhs_rhs {
+                println!("fert");
+              }
               should_add_inner |= is_lhs_rhs;
             }
             if should_add_inner {
-              println!("add cc lemma");
+              println!(
+                "add cc lemma {} {}",
+                self.egraph.id_to_expr(class_1_id),
+                self.egraph.id_to_expr(class_2_id)
+              );
               if self.add_lemma(
                 timer,
                 lemmas_state,
@@ -3295,19 +3494,501 @@ impl<'a> Goal<'a> {
     );
   }
 
+  pub fn query_llm(&self) {
+    println!("querying llm");
+
+    let prompt = "Please find equivalences of the form f1=f2. \
+          Don't output anything else except f1=f2, \
+          where f1 and f2 are expressions.";
+
+    // trpl::run(async {
+    RUNTIME.spawn(async move {
+      // Create a OpenAI client with api key from env var OPENAI_API_KEY and default base url.
+      let client = Client::new();
+      let request = CreateChatCompletionRequestArgs::default()
+        .model("gpt-4o-mini")
+        .messages([ChatCompletionRequestUserMessageArgs::default()
+          .content(prompt)
+          .build()
+          .unwrap()
+          .into()])
+        .max_tokens(200_u32)
+        .build()
+        .unwrap();
+      // Call API
+      let response = client
+        .chat() // Get the API "group" (completions, images, etc.) from the client
+        .create(request) // Make the API call in that "group"
+        .await
+        .unwrap();
+
+      println!(
+        "response: {}",
+        response
+          .choices
+          .first()
+          .unwrap()
+          .message
+          .content
+          .clone()
+          .unwrap()
+      );
+    });
+    // loop {
+    //   tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    // }
+    // });
+  }
+
+  pub fn get_other_rules() -> Vec<Rw> {
+    let mut temp_lemmas = vec![];
+    let lem1 = {
+      let ite0 = format!("{}{}", *ITE, 0);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?c {})", ite0, *TRUE).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("({} ({} ?a ?b) ?c {})", ite0, *AND, *TRUE)
+        .parse()
+        .unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special1"),
+        rhs,
+        ConditionalApplier {
+          applier: pattern_true.clone(),
+          condition: ConditionEqual::new(lhs, pattern_true),
+        },
+      )
+      .unwrap()
+    };
+    // LHS-VARS > RHS-VARS
+    let lem2 = {
+      let and = format!("{}", *AND);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", and).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("?a").parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special2"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        DualApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem3 = {
+      let and = format!("{}", *AND);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", and).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special3"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        DualApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem4 = {
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", *NATEQ).parse().unwrap();
+      let rhs1: Pattern<SymbolLang> = format!("?a").parse().unwrap();
+      let rhs2: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      Rewrite::new(
+        format!("special4"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        DualApplier::new(rhs1, rhs2),
+      )
+      .unwrap()
+    };
+    let lem5 = {
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a)", *NOT).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("({} ?b)", *NOT).parse().unwrap();
+      let rhs1: Pattern<SymbolLang> = format!("?a").parse().unwrap();
+      let rhs2: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      Rewrite::new(
+        format!("special5"),
+        DualSearcher {
+          searcher1: lhs1,
+          searcher2: lhs2,
+          equality_between_substs: true,
+        },
+        DualApplier::new(rhs1, rhs2),
+      )
+      .unwrap()
+    };
+    let lem6 = {
+      let ite0 = format!("{}{}", *ITE, 0);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a {} {})", ite0, *FALSE, *TRUE)
+        .parse()
+        .unwrap();
+      let rhs = format!("?a").parse().unwrap();
+      let pattern_false: Pattern<SymbolLang> = format!("{}", *FALSE).parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special23"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        DualApplier::new(rhs, pattern_false.clone()),
+      )
+      .unwrap()
+    };
+    let lem7 = {
+      let ite0 = format!("{}{}", *ITE, 0);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a {} {})", ite0, *TRUE, *FALSE)
+        .parse()
+        .unwrap();
+      let rhs = format!("?a").parse().unwrap();
+      let pattern_false: Pattern<SymbolLang> = format!("{}", *FALSE).parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special2"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        DualApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem8 = {
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a ?b)", *LQ).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("({} ?b ?c)", *LQ).parse().unwrap();
+      let rhs = format!("({} ?a ?c)", *LQ).parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special2000"),
+        DualSearcher {
+          searcher1: ConditionalSearcher {
+            searcher: lhs1.clone(),
+            condition: StrEquality::new(TRUE.clone()),
+          },
+          searcher2: ConditionalSearcher {
+            searcher: lhs2.clone(),
+            condition: StrEquality::new(TRUE.clone()),
+          },
+          equality_between_substs: false,
+        },
+        DualApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem9 = {
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a ?b)", *LQ).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("({} ?c ?b)", *LQ).parse().unwrap();
+      let rhs = format!("({} ?a ?c)", *LQ).parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special200900"),
+        DualSearcher {
+          searcher1: ConditionalSearcher {
+            searcher: lhs1.clone(),
+            condition: StrEquality::new(TRUE.clone()),
+          },
+          searcher2: ConditionalSearcher {
+            searcher: lhs2.clone(),
+            condition: StrEquality::new(FALSE.clone()),
+          },
+          equality_between_substs: false,
+        },
+        DualApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem10 = {
+      let ite0 = format!("{}{}", *ITE, 0);
+      let ite2 = format!("{}{}", *ITE, 2);
+      let lhs: Pattern<SymbolLang> = format!("({} ?n ({} ?v ?b ?c))", *LQ, ite2).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("({} ?v ({} ?n ?b) ({} ?n ?c))", ite0, *LQ, *LQ)
+        .parse()
+        .unwrap();
+      Rewrite::new(format!("special20001"), lhs, rhs).unwrap()
+    };
+    let lem11 = {
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a ?b)", *PLUS).parse().unwrap();
+      let rhs1: Pattern<SymbolLang> = format!("({} ?a ?c)", *PLUS).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      let rhs2: Pattern<SymbolLang> = format!("?c").parse().unwrap();
+      Rewrite::new(
+        format!("special200033"),
+        DualSearcher {
+          searcher1: lhs1,
+          searcher2: rhs1,
+          equality_between_substs: true,
+        },
+        DualApplier::new(lhs2, rhs2),
+      )
+      .unwrap()
+    };
+    let lem12 = {
+      let size = format!("{}", mangle_name("tf1"));
+      let sum1 = format!("{}", mangle_name("sum1"));
+      let zero = format!("{}", mangle_name("Zero"));
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a)", size).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("({} ?a)", sum1).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("{}", zero).parse().unwrap();
+      Rewrite::new(
+        format!("special2000334"),
+        ConditionalSearcher {
+          searcher: lhs1.clone(),
+          condition: StrEquality::new(zero),
+        },
+        DualApplier::new(lhs2, rhs),
+      )
+      .unwrap()
+    };
+    temp_lemmas.push(lem1);
+    temp_lemmas.push(lem2);
+    temp_lemmas.push(lem3);
+    temp_lemmas.push(lem4);
+    temp_lemmas.push(lem5);
+    temp_lemmas.push(lem6);
+    temp_lemmas.push(lem7);
+    temp_lemmas.push(lem8);
+    temp_lemmas.push(lem9);
+    temp_lemmas.push(lem10);
+    temp_lemmas.push(lem11);
+    temp_lemmas.push(lem12);
+    temp_lemmas[0..12].to_vec()
+  }
+
+  pub fn get_other_rules_cvec() -> Vec<CvecRw> {
+    let mut temp_lemmas = vec![];
+    let lem1 = {
+      let ite0 = format!("{}{}", *ITE, 0);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?c {})", ite0, *TRUE).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("({} ({} ?a ?b) ?c {})", ite0, *AND, *TRUE)
+        .parse()
+        .unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special1"),
+        rhs,
+        ConditionalApplier {
+          applier: pattern_true.clone(),
+          condition: ConditionEqual::new(lhs, pattern_true),
+        },
+      )
+      .unwrap()
+    };
+    // LHS-VARS > RHS-VARS
+    let lem2 = {
+      let and = format!("{}", *AND);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", and).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("?a").parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special2"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        DualApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem3 = {
+      let and = format!("{}", *AND);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", and).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special3"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        DualApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem4 = {
+      let lhs: Pattern<SymbolLang> = format!("({} ?a ?b)", *NATEQ).parse().unwrap();
+      let rhs1: Pattern<SymbolLang> = format!("?a").parse().unwrap();
+      let rhs2: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      Rewrite::new(
+        format!("special4"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        DualApplier::new(rhs1, rhs2),
+      )
+      .unwrap()
+    };
+    let lem5 = {
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a)", *NOT).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("({} ?b)", *NOT).parse().unwrap();
+      let rhs1: Pattern<SymbolLang> = format!("?a").parse().unwrap();
+      let rhs2: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      Rewrite::new(
+        format!("special5"),
+        DualSearcher {
+          searcher1: lhs1,
+          searcher2: lhs2,
+          equality_between_substs: true,
+        },
+        DualApplier::new(rhs1, rhs2),
+      )
+      .unwrap()
+    };
+    let lem6 = {
+      let ite0 = format!("{}{}", *ITE, 0);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a {} {})", ite0, *FALSE, *TRUE)
+        .parse()
+        .unwrap();
+      let rhs = format!("?a").parse().unwrap();
+      let pattern_false: Pattern<SymbolLang> = format!("{}", *FALSE).parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special23"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        DualApplier::new(rhs, pattern_false.clone()),
+      )
+      .unwrap()
+    };
+    let lem7 = {
+      let ite0 = format!("{}{}", *ITE, 0);
+      let lhs: Pattern<SymbolLang> = format!("({} ?a {} {})", ite0, *TRUE, *FALSE)
+        .parse()
+        .unwrap();
+      let rhs = format!("?a").parse().unwrap();
+      let pattern_false: Pattern<SymbolLang> = format!("{}", *FALSE).parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special2"),
+        ConditionalSearcher {
+          searcher: lhs.clone(),
+          condition: StrEquality::new(TRUE.clone()),
+        },
+        DualApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem8 = {
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a ?b)", *LQ).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("({} ?b ?c)", *LQ).parse().unwrap();
+      let rhs = format!("({} ?a ?c)", *LQ).parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special2000"),
+        DualSearcher {
+          searcher1: ConditionalSearcher {
+            searcher: lhs1.clone(),
+            condition: StrEquality::new(TRUE.clone()),
+          },
+          searcher2: ConditionalSearcher {
+            searcher: lhs2.clone(),
+            condition: StrEquality::new(TRUE.clone()),
+          },
+          equality_between_substs: false,
+        },
+        DualApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem9 = {
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a ?b)", *LQ).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("({} ?c ?b)", *LQ).parse().unwrap();
+      let rhs = format!("({} ?a ?c)", *LQ).parse().unwrap();
+      let pattern_true: Pattern<SymbolLang> = format!("{}", *TRUE).parse().unwrap();
+      Rewrite::new(
+        format!("special200900"),
+        DualSearcher {
+          searcher1: ConditionalSearcher {
+            searcher: lhs1.clone(),
+            condition: StrEquality::new(TRUE.clone()),
+          },
+          searcher2: ConditionalSearcher {
+            searcher: lhs2.clone(),
+            condition: StrEquality::new(FALSE.clone()),
+          },
+          equality_between_substs: false,
+        },
+        DualApplier::new(rhs, pattern_true.clone()),
+      )
+      .unwrap()
+    };
+    let lem10 = {
+      let ite0 = format!("{}{}", *ITE, 0);
+      let ite2 = format!("{}{}", *ITE, 2);
+      let lhs: Pattern<SymbolLang> = format!("({} ?n ({} ?v ?b ?c))", *LQ, ite2).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("({} ?v ({} ?n ?b) ({} ?n ?c))", ite0, *LQ, *LQ)
+        .parse()
+        .unwrap();
+      Rewrite::new(format!("special20001"), lhs, rhs).unwrap()
+    };
+    let lem11 = {
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a ?b)", *PLUS).parse().unwrap();
+      let rhs1: Pattern<SymbolLang> = format!("({} ?a ?c)", *PLUS).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("?b").parse().unwrap();
+      let rhs2: Pattern<SymbolLang> = format!("?c").parse().unwrap();
+      Rewrite::new(
+        format!("special200033"),
+        DualSearcher {
+          searcher1: lhs1,
+          searcher2: rhs1,
+          equality_between_substs: true,
+        },
+        DualApplier::new(lhs2, rhs2),
+      )
+      .unwrap()
+    };
+    let lem12 = {
+      let size = format!("{}", mangle_name("tf1"));
+      let sum1 = format!("{}", mangle_name("sum1"));
+      let zero = format!("{}", mangle_name("Zero"));
+      let lhs1: Pattern<SymbolLang> = format!("({} ?a)", size).parse().unwrap();
+      let lhs2: Pattern<SymbolLang> = format!("({} ?a)", sum1).parse().unwrap();
+      let rhs: Pattern<SymbolLang> = format!("{}", zero).parse().unwrap();
+      Rewrite::new(
+        format!("special2000334"),
+        ConditionalSearcher {
+          searcher: lhs1.clone(),
+          condition: StrEquality::new(zero),
+        },
+        DualApplier::new(lhs2, rhs),
+      )
+      .unwrap()
+    };
+    temp_lemmas.push(lem1);
+    temp_lemmas.push(lem2);
+    temp_lemmas.push(lem3);
+    temp_lemmas.push(lem4);
+    temp_lemmas.push(lem5);
+    temp_lemmas.push(lem6);
+    temp_lemmas.push(lem7);
+    temp_lemmas.push(lem8);
+    temp_lemmas.push(lem9);
+    temp_lemmas.push(lem10);
+    temp_lemmas.push(lem11);
+    temp_lemmas.push(lem12);
+    temp_lemmas[0..12].to_vec()
+  }
+
   /// Returns a vector of lemmas necessary to discharge this goal.
   pub fn find_lemmas_that_discharge(
     &self,
     lemmas_state: &LemmasState,
     lemma_rws: &Vec<Rw>,
   ) -> BTreeSet<usize> {
+    let temp = Goal::get_other_rules();
     let rewrites = self
       .global_search_state
       .reductions
       .iter()
       .chain(self.lemmas.values())
       .chain(lemmas_state.lemma_rewrites.values())
-      .chain(lemma_rws.iter());
+      .chain(lemma_rws.iter())
+      .chain(temp.iter());
     let lhs_id = self.eq.lhs.id;
     let rhs_id = self.eq.rhs.id;
     let mut runner = Runner::default()
@@ -3462,8 +4143,13 @@ impl LemmasState {
     !is_proven && !is_invalid && !is_too_big
   }
 
-  pub fn find_or_make_fresh_lemma(&mut self, prop: Prop, proof_depth: usize) -> usize {
-    println!("mprop: {}", prop);
+  pub fn find_or_make_fresh_lemma(
+    &mut self,
+    prop: Prop,
+    proof_depth: usize,
+    impl_depth: usize,
+  ) -> usize {
+    // println!("mprop: {}", prop);
     self
       .all_lemmas
       .entry(prop)
@@ -3488,12 +4174,16 @@ impl LemmasState {
     &mut self,
     iter: I,
     proof_depth: usize,
+    impl_depth: usize,
   ) -> Vec<(usize, Prop)> {
     let mut new_lemmas = Vec::new();
     for lemma in iter.into_iter() {
       if self.is_valid_new_prop(&lemma) {
         let backup = lemma.clone();
-        new_lemmas.push((self.find_or_make_fresh_lemma(lemma, proof_depth), backup));
+        new_lemmas.push((
+          self.find_or_make_fresh_lemma(lemma, proof_depth, impl_depth),
+          backup,
+        ));
       }
     }
     new_lemmas
@@ -3505,13 +4195,14 @@ impl LemmasState {
     &mut self,
     iter: I,
     proof_depth: usize,
+    impl_depth: usize,
   ) -> (Vec<(usize, Rw)>, Vec<(usize, Prop)>) {
     let mut new_lemmas = Vec::new();
     let mut new_implies_rws = Vec::new();
     for lemma in iter.into_iter() {
       if self.is_valid_new_prop(&lemma.0) {
         let backup = lemma.0.clone();
-        let n = self.find_or_make_fresh_lemma(lemma.0, proof_depth);
+        let n = self.find_or_make_fresh_lemma(lemma.0, proof_depth, impl_depth);
         new_lemmas.push((n, backup));
         new_implies_rws.push((n, lemma.1));
       }
@@ -3556,7 +4247,7 @@ pub struct LemmaProofState<'a> {
   pub lemma_proof: ProofInfo,
   pub outcome: Option<Outcome>,
   pub proof_depth: usize,
-  pub case_split_depth: usize,
+  pub impl_depth: usize,
   pub ih_lemma_number: usize,
   // NOTE: We are phasing this out at least for proving lemmas breadth-first
   pub theorized_lemmas: ChainSet<Prop>,
@@ -3581,6 +4272,7 @@ impl<'a> LemmaProofState<'a> {
     premise: &Option<Equation>,
     global_search_state: GlobalSearchState<'a>,
     proof_depth: usize,
+    impl_depth: usize,
   ) -> Self {
     let lemma_name = get_lemma_name(lemma_number);
     let mut goal = Goal::top(
@@ -3601,15 +4293,9 @@ impl<'a> LemmaProofState<'a> {
       goal.make_lemma_rewrite_unchecked(&goal.eq.lhs.expr, &goal.eq.rhs.expr, lemma_number, false);
     let mut outcome = goal.cvecs_valid().and_then(|is_valid| {
       // RIPPLE-VERIFY-PRINT
-      print_cvec(
-        &goal.egraph.analysis.cvec_analysis,
-        &goal.egraph[goal.eq.lhs.id].data.cvec_data,
-      );
-      print_cvec(
-        &goal.egraph.analysis.cvec_analysis,
-        &goal.egraph[goal.eq.rhs.id].data.cvec_data,
-      );
       println!("{} cvec is valid? = {}", lemma_name, is_valid);
+      println!("{:?}", goal.egraph[goal.eq.lhs.id].data.cvec_data);
+      println!("{:?}", goal.egraph[goal.eq.rhs.id].data.cvec_data);
       // FIXME: Handle premises in cvecs so that we can reject invalid props
       // with preconditions
       if premise.is_none() && !is_valid {
@@ -3626,14 +4312,6 @@ impl<'a> LemmaProofState<'a> {
         println!("Property accepted by cvec analysis");
       } else {
         println!("Property rejected by cvec analysis");
-        print_cvec(
-          &goal.egraph.analysis.cvec_analysis,
-          &goal.egraph[goal.eq.lhs.id].data.cvec_data,
-        );
-        print_cvec(
-          &goal.egraph.analysis.cvec_analysis,
-          &goal.egraph[goal.eq.rhs.id].data.cvec_data,
-        );
       }
     }
 
@@ -3646,7 +4324,7 @@ impl<'a> LemmaProofState<'a> {
       lemma_proof: ProofInfo::default(),
       outcome,
       proof_depth,
-      case_split_depth: 0,
+      impl_depth,
       ih_lemma_number: lemma_number,
       theorized_lemmas: ChainSet::default(),
       rw: lemma_rw_opt,
@@ -3755,23 +4433,93 @@ impl<'a> LemmaProofState<'a> {
     let mut related_lemmas = Vec::new();
     let mut rw_indices_all = Vec::new();
     if CONFIG.generalization {
-      println!("GENERALIZATION");
+      println!("GOAL GENERALIZATION");
+      let temp: Vec<String> = blocking_exprs
+        .iter()
+        .map(|id| goal.egraph.id_to_expr(*id).to_string())
+        .collect();
+      println!("blocking exprs: {:?}", temp);
       let lemma_indices = lemmas_state.add_lemmas(
         goal.find_generalized_goals(&blocking_exprs),
         self.proof_depth + 1,
+        self.impl_depth,
       );
+      for p in lemma_indices.clone() {
+        println!("{}", p.1.eq);
+      }
       related_lemmas.extend(lemma_indices);
     }
     // println!("searching for cc lemmas");
+    // goal.query_llm();
+
     if CONFIG.cc_lemmas {
       println!("CC LEMMAS");
+      // if false {
       let possible_lemmas = goal.search_for_cc_lemmas(timer, lemmas_state);
-      let lemma_indices = lemmas_state.add_lemmas(possible_lemmas, self.proof_depth + 1);
+      let lemma_indices =
+        lemmas_state.add_lemmas(possible_lemmas, self.proof_depth + 1, self.impl_depth);
       related_lemmas.extend(lemma_indices);
+      // }
+
+      // IMPL ON IMPL - DANGEROUS
+      // if goal.implies_rw.is_some()
+      //   && self.impl_depth < MAX_IMPL_DEPTH
+      //   && goal.case_split_vars.len() == 0
+      // {
+      //   let mut goals_mod = vec![goal.clone()];
+      //   for i in 0..3 {
+      //     println!("DEPTH {}", i);
+      //     // depth for case split for impl search
+      //     let mut goals_mod_new = vec![];
+      //     for mut g in goals_mod.clone().into_iter() {
+      //       println!("inside a goal: ");
+      //       g._print_lhs_rhs();
+      //       println!("scrutinees: {:?}", g.scrutinees);
+      //       g.saturate(&lemmas_state.lemma_rewrites);
+      //       let (blocking_vars, _) = g.find_blocking(timer);
+      //       println!("blocking vars: {:?}", blocking_vars.clone());
+      //       let mut case_split_found = false;
+      //       while !case_split_found {
+      //         if let Some(scrutinee) = g.next_scrutinee(blocking_vars.clone()) {
+      //           println!("next scrutinee");
+      //           if g.local_context.get(&scrutinee.name).unwrap().to_string() != BOOL_TYPE.clone() {
+      //             println!("not a bool: good");
+      //             let (_, goals) = g.clone().case_split(
+      //               scrutinee,
+      //               timer,
+      //               lemmas_state,
+      //               self.ih_lemma_number,
+      //               true,
+      //             );
+      //             goals_mod_new.extend(goals);
+      //             case_split_found = true;
+      //           }
+      //         } else {
+      //           break;
+      //         }
+      //       }
+      //       if !case_split_found {
+      //         goals_mod_new.push(g);
+      //       }
+      //     }
+      //     goals_mod = goals_mod_new;
+      //   }
+      //   for mut g in goals_mod {
+      //       let possible_lemmas: Vec<(Prop, Rewrite<SymbolLang, CycleggAnalysis>)> =
+      //         goal.search_for_implies_lemmas_on_implies_goal(&self.prop, timer, lemmas_state);
+      //       let (rw_indices, lemma_indices) = lemmas_state.add_lemmas_with_rw(
+      //         possible_lemmas,
+      //         self.proof_depth + 1,
+      //         self.impl_depth + 1,
+      //       );
+      //       related_lemmas.extend(lemma_indices);
+      //       rw_indices_all.extend(rw_indices);
+      //   }
+      // }
 
       unsafe {
-        if self.case_split_depth == 0 && !IMPLIES_LEMMA_SEARCHED {
-          IMPLIES_LEMMA_SEARCHED = true;
+        if goal.case_split_vars.len() == 0 && IMPLIES_LEMMA_SEARCHED == 0 {
+          IMPLIES_LEMMA_SEARCHED += 1;
           let mut goals_mod = vec![goal.clone()];
           for i in 0..3 {
             println!("DEPTH {}", i);
@@ -3782,6 +4530,9 @@ impl<'a> LemmaProofState<'a> {
               g._print_lhs_rhs();
               println!("scrutinees: {:?}", g.scrutinees);
               g.saturate(&lemmas_state.lemma_rewrites);
+              if CONFIG.save_graphs {
+                g.save_egraph();
+              }
               let (blocking_vars, _) = g.find_blocking(timer);
               println!("blocking vars: {:?}", blocking_vars.clone());
               let mut case_split_found = false;
@@ -3791,9 +4542,13 @@ impl<'a> LemmaProofState<'a> {
                   if g.local_context.get(&scrutinee.name).unwrap().to_string() != BOOL_TYPE.clone()
                   {
                     println!("not a bool: good");
-                    let (_, goals) =
-                      g.clone()
-                        .case_split(scrutinee, timer, lemmas_state, self.ih_lemma_number);
+                    let (_, goals) = g.clone().case_split(
+                      scrutinee,
+                      timer,
+                      lemmas_state,
+                      self.ih_lemma_number,
+                      true,
+                    );
                     goals_mod_new.extend(goals);
                     case_split_found = true;
                   }
@@ -3808,11 +4563,20 @@ impl<'a> LemmaProofState<'a> {
             goals_mod = goals_mod_new;
           }
           for mut g in goals_mod {
-            let possible_lemmas = g.search_for_implies_lemmas(&self.prop, timer, lemmas_state);
-            let (rw_indices, lemma_indices) =
-              lemmas_state.add_lemmas_with_rw(possible_lemmas, self.proof_depth + 1);
+            let possible_lemmas: Vec<(Prop, Rewrite<SymbolLang, CycleggAnalysis>)> =
+              g.search_for_implies_lemmas(&self.prop, timer, lemmas_state);
+            let (rw_indices, lemma_indices) = lemmas_state.add_lemmas_with_rw(
+              possible_lemmas,
+              self.proof_depth + 1,
+              self.impl_depth,
+            );
             related_lemmas.extend(lemma_indices);
             rw_indices_all.extend(rw_indices);
+
+            // let possible_lemmas = g.search_for_cc_lemmas(timer, lemmas_state);
+            // let lemma_indices =
+            //   lemmas_state.add_lemmas(possible_lemmas, self.proof_depth + 1, self.impl_depth);
+            // related_lemmas.extend(lemma_indices);
           }
         }
       }
@@ -3827,6 +4591,36 @@ impl<'a> LemmaProofState<'a> {
     // RIPPLE-VERIFY: TODO control case split
     let b_len = blocking_vars.len();
     println!("blocking vars: {:?}", blocking_vars.clone());
+    println!("scrutinees before: {:?}", goal.scrutinees.clone());
+    // fix
+    println!("sorting scrutinees - goal guard first");
+    let mut n = goal.scrutinees.len();
+    let mut scrutinees_mod_guards_1: VecDeque<Scrutinee> = VecDeque::new();
+    let mut scrutinees_mod_guards_2: VecDeque<Scrutinee> = VecDeque::new();
+    let mut scrutinees_mod_vars: VecDeque<Scrutinee> = VecDeque::new();
+    while n > 0 {
+      let s = goal.scrutinees.pop_front().unwrap();
+      if s.scrutinee_type == ScrutineeType::Var {
+        scrutinees_mod_vars.push_back(s);
+      } else {
+        if s.depth == 1 {
+          // magic number
+          println!("GOAL SAME AS SCRUT");
+          scrutinees_mod_guards_1.push_back(s);
+        } else {
+          scrutinees_mod_guards_2.push_back(s);
+        }
+      }
+      n -= 1;
+    }
+    goal.scrutinees = scrutinees_mod_guards_1;
+    for s in scrutinees_mod_guards_2 {
+      goal.scrutinees.push_back(s);
+    }
+    for s in scrutinees_mod_vars {
+      goal.scrutinees.push_back(s);
+    }
+    println!("scrutinees after: {:?}", goal.scrutinees.clone());
     if let Some(scrutinee) = goal.next_scrutinee(blocking_vars) {
       println!("CASE SPLIT on {}", scrutinee.name);
       // TODO SCRUTINEE CHECK
@@ -3839,16 +4633,25 @@ impl<'a> LemmaProofState<'a> {
         );
       }
       let goal_name = goal.name.clone();
-      let (proof_term, goals) =
-        goal
-          .clone()
-          .case_split(scrutinee, timer, lemmas_state, self.ih_lemma_number);
+      let (proof_term, goals) = goal.clone().case_split(
+        scrutinee,
+        timer,
+        lemmas_state,
+        self.ih_lemma_number,
+        goal.implies_rw.is_none(),
+      );
       // This goal is now an internal node in the proof tree.
       self.lemma_proof.proof.insert(goal_name, proof_term);
       // Add the new goals to the back of the VecDeque.
       let goal_infos = goals
         .iter()
-        .map(|new_goal| GoalInfo::new(new_goal, info.lemma_id))
+        .map(|new_goal| {
+          if new_goal.is_implication() {
+            GoalInfo::new_implies(new_goal, info.lemma_id)
+          } else {
+            GoalInfo::new(new_goal, info.lemma_id)
+          }
+        })
         .collect();
       self.goals.extend(goals);
       return Some((related_lemmas, rw_indices_all, goal_infos));
@@ -3879,6 +4682,7 @@ impl<'a> LemmaProofState<'a> {
     println!("try finish");
     println!("goal: {}", goal);
     if let Some(leaf) = goal.find_proof() {
+      println!("found!!");
       let name = goal.name.clone();
       self.process_goal_explanation(leaf, &name);
       true
@@ -3900,7 +4704,7 @@ impl<'a> LemmaProofState<'a> {
     let goal = self.goals.get_mut(pos).unwrap();
     let possible_lemmas = goal.search_for_cc_lemmas(timer, lemmas_state);
 
-    lemmas_state.add_lemmas(possible_lemmas, self.proof_depth + 1)
+    lemmas_state.add_lemmas(possible_lemmas, self.proof_depth + 1, self.impl_depth)
   }
 
   fn process_goal_explanation(&mut self, proof_leaf: ProofLeaf, goal_name: &str) {
@@ -4135,7 +4939,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
     // RIPPLE-VERIFY-PRINT queue
 
     // if CONFIG.verbose {
-    let _goals = self.goal_graph.get_lemma(0).goals.clone();
+    // let _goals = self.goal_graph.get_lemma(0).goals.clone();
     println!("\n\n================= current queue ==============");
     // LIMIT TO 10
     for info in frontier.clone().into_iter().sorted().rev().take(10) {
@@ -4196,6 +5000,7 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
         &None,
         proof_state.global_search_state,
         0,
+        0,
       ));
     }
 
@@ -4233,6 +5038,12 @@ impl BreadthFirstScheduler for GoalLevelPriorityQueue {
       lemma_proof_state.try_goal(&info, &proof_state.timer, &mut proof_state.lemmas_state);
 
     if let Some((raw_related_lemmas, raw_implies_rws, related_goals)) = step_res {
+      println!(
+        "num related lemmas: {} {} {}",
+        raw_related_lemmas.len(),
+        raw_implies_rws.len(),
+        related_goals.len()
+      );
       let mut related_lemmas = raw_related_lemmas;
       if CONFIG.exclude_bid_reachable {
         let _pre_size = related_lemmas.len();
@@ -4556,15 +5367,17 @@ pub fn prove_top(
     global_search_state,
   };
 
-  let top_goal_lemma_number = proof_state
-    .lemmas_state
-    .find_or_make_fresh_lemma(goal_prop.clone(), 0);
+  let top_goal_lemma_number =
+    proof_state
+      .lemmas_state
+      .find_or_make_fresh_lemma(goal_prop.clone(), 0, 0);
   let top_goal_lemma_proof = LemmaProofState::new(
     top_goal_lemma_number,
     goal_prop,
     None,
     &goal_premise,
     global_search_state,
+    0,
     0,
   );
 

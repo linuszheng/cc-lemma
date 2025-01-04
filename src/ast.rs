@@ -133,6 +133,8 @@ lazy_static! {
   pub static ref NOT: String = mangle_name("not");
   pub static ref AND: String = mangle_name("and");
   pub static ref OR: String = mangle_name("or");
+  pub static ref LQ: String = mangle_name("lq");
+  pub static ref PLUS: String = mangle_name("plus");
 }
 pub const ARROW: &str = "->";
 pub const APPLY: &str = "$";
